@@ -1,0 +1,32 @@
+# ---- Build output ----
+build/
+dist/
+*.spec
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+
+# ---- RootsVoice personal data (never commit: settings, learned words, voice recordings, models) ----
+rootsvoice_settings.json
+rootsvoice_aliases.json
+rootsvoice_replacements.json
+rootsvoice_soundalikes.json
+rootsvoice_prompts.json
+rootsvoice_training/
+rootsvoice_models/
+
+# ---- Editors and operating systems ----
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- Logs ----
+*.log

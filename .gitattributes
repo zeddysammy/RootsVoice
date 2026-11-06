@@ -1,2 +1,13 @@
-# Auto detect text files and perform LF normalization
+# Normalise line endings in the repository
 * text=auto
+
+# Windows scripts must keep Windows line endings or they misbehave
+*.bat text eol=crlf
+*.iss text eol=crlf
+
+# Binary files: never touch
+*.ico binary
+*.bmp binary
+*.png binary
+*.jpg binary
+*.wav binary

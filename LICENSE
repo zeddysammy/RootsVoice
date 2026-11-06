@@ -1,0 +1,19 @@
+Copyright (c) 2026 nightfellas. All rights reserved.
+
+RootsVoice, including its source code, installer and Roots logo artwork, is
+the property of nightfellas. You may install and use the released RootsVoice
+installer for church and ministry services. You may not copy, modify,
+redistribute or sell the source code or the logo without written permission
+from nightfellas.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR ITS USE.
+
+Third-party components bundled in the installer keep their own licences:
+faster-whisper (MIT), CTranslate2 (MIT), OpenAI Whisper models (MIT),
+ONNX Runtime (MIT), NumPy (BSD-3-Clause), sounddevice (MIT), PortAudio (MIT),
+PyAV (BSD-3-Clause) with FFmpeg libraries (LGPL-2.1-or-later),
+PyAutoGUI (BSD-3-Clause), PyGetWindow (BSD-3-Clause), tokenizers (Apache-2.0).
