@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo/roots-icon-128.png" width="96" alt="RootsVoice logo">
+  <img src="roots-icon-128.png" width="96" alt="RootsVoice logo">
 </p>
 
 <h1 align="center">RootsVoice</h1>
