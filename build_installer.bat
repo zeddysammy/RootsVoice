@@ -9,7 +9,7 @@ echo.
 echo  ============================================================
 echo    RootsVoice installer builder  -  nightfellas
 echo  ============================================================
-echo    Builds RootsVoice-Setup-2.1.exe. Needs internet and takes
+echo    Builds RootsVoice-Setup-2.2.3.exe. Needs internet and takes
 echo    about 10-20 minutes the first time. Leave this window open.
 echo.
 
@@ -98,12 +98,12 @@ goto fail
 :have_iscc
 "%ISCC%" %ISSDEFS% "%ROOT%installer\RootsVoice.iss"
 if errorlevel 1 goto fail
-if not exist "%ROOT%dist\RootsVoice-Setup-2.1.exe" goto fail
+if not exist "%ROOT%dist\RootsVoice-Setup-2.2.3.exe" goto fail
 
 echo.
 echo  ============================================================
 echo    Done! Your installer is ready:
-echo    %ROOT%dist\RootsVoice-Setup-2.1.exe
+echo    %ROOT%dist\RootsVoice-Setup-2.2.3.exe
 echo.
 echo    Copy it to any Windows 10 or 11 PC and double-click it.
 echo    Nothing else needs to be installed on that PC.

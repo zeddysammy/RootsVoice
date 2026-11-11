@@ -44,7 +44,7 @@ Both must print `ALL PASS`. They also run automatically on every push and pull r
 
 1. Update the version in **four** places:
    - `APP_VERSION` in `rootsvoice.py`
-   - `#define MyAppVersion` in `installer/RootsVoice.iss`
+   - `#define MyAppVersion` and `MyAppFileVersion` (four numbers) in `installer/RootsVoice.iss`
    - `filevers`, `prodvers`, `FileVersion`, `ProductVersion` in `installer/version_info.txt`
    - the file name in the final message of `build_installer.bat`
 2. Move the notes in `CHANGELOG.md` under the new version and date.

@@ -1,8 +1,10 @@
 """
-RootsVoice - speak a Bible reference, show it in VideoPsalm.
+RootsVoice - speak a Bible reference, show it in your projection software.
 
-Listens to a microphone, picks out Bible references and voice commands, and types them
-into VideoPsalm's search box. Each new reference REPLACES whatever was in the box.
+Listens to a microphone, picks out Bible references and voice commands, and shows them in
+VideoPsalm, BibleShow, EasyWorship, ProPresenter, OpenLP, FreeShow or any program with a
+reference box. Each new reference REPLACES whatever was there before. If a book name is
+misheard, nothing is shown - RootsVoice asks "Did you mean ...?" instead of guessing.
 Ordinary preaching is ignored: only scripture-related speech is acted on or shown.
 
 What it understands
@@ -18,7 +20,7 @@ What it understands
     Impossible references ("John 35", "Psalm 151") are ignored as mishearings.
 
 RootsAuto (Live tab)
-    Autopilot: references and commands go to VideoPsalm the moment the speaker stops,
+    Autopilot: references and commands go on screen the moment the speaker stops,
     with no confirmation. Click the green bar to pause it. "Back" undoes a wrong jump.
     Optional safety: Settings > "Short commands need 'Roots' first" ("Roots, next verse").
 
@@ -84,8 +86,15 @@ TRAINING_DIR = os.path.join(BASE_DIR, "rootsvoice_training")        # recorded s
 MODELS_DIR = os.path.join(BASE_DIR, "rootsvoice_models")            # downloaded speech models
 
 DEFAULTS = {
-    "window_title": "VideoPsalm",   # text that appears in VideoPsalm's window title
-    "search_hotkey": "ctrl+f",      # opens VideoPsalm's search
+    "target": "videopsalm",         # projection software: see TARGETS
+    "window_title": "VideoPsalm",   # text that appears in the program's window title
+    "focus": "hotkey",              # how to reach its reference box: "hotkey" or "click" (a spot you point to)
+    "search_hotkey": "ctrl+f",      # the shortcut that opens its search / reference box
+    "click_x": None,                # where the reference box is, from the window's top-left corner
+    "click_y": None,
+    "api_port": 5506,               # FreeShow's API port
+    "api_key": "",                  # FreeShow's API key, if one is set
+    "targets": {},                  # saved settings for each program you have used
     "after_keys": "enter",          # comma-separated keys pressed after typing, e.g. "enter,enter"
     "separator": ":",               # between chapter and verse
     "model": "base.en",             # tiny.en / base.en / small.en / medium.en
@@ -95,17 +104,17 @@ DEFAULTS = {
     "always_on_top": True,
     "live_learning": False,         # show the "fix what it heard" panel on the Live tab
     "roots_auto": False,            # RootsAuto: act on voice instantly, no confirmation
-    "next_key": "",                 # key VideoPsalm uses for next verse; blank = type the reference
+    "next_key": "",                 # the program's own next-verse key; blank = type the reference
     "prev_key": "",                 # key for previous verse; blank = type the reference
-    "clear_key": "",                # key that blanks VideoPsalm's screen; blank = voice clear is off
+    "clear_key": "",                # the program's blank-screen key; blank = voice clear is off
     "wake_word": False,             # short commands ("next verse") need "Roots" first
     "show_all_speech": False,       # log everything, not just scripture-related speech
     "theme": "light",               # "light" or "dark" (night mode)
     "size": "auto",                 # window size: auto, compact, normal, large
-    "global_keys": True,            # Ctrl+Alt shortcuts that work while VideoPsalm is in front
+    "global_keys": True,            # Ctrl+Alt shortcuts that work while the projection software is in front
     "clicker": False,               # presentation clicker: Page Down / Page Up = next / previous verse
 }
-APP_VERSION = "2.1"
+APP_VERSION = "2.2.3"
 APP_PUBLISHER = "nightfellas"
 SAMPLE_RATE = 16000
 REPEAT_WINDOW = 20      # seconds in which the same reference is ignored
@@ -501,6 +510,7 @@ class RefTracker:
         self.book = self.ch = self.v1 = self.v2 = None
         self.action = None
         self.clear = False
+        self.unclear = False    # True when a book name was heard but not recognised
 
     def format(self):
         return format_ref(self.book, self.ch, self.v1, self.v2, self.separator)
@@ -523,7 +533,7 @@ class RefTracker:
         """`text` may start with the tail of the previous phrase (so a reference split
         across two phrases is still caught). Only matches reaching into `fresh_text`
         are acted on, so nothing from earlier speech is ever applied twice."""
-        self.action, self.clear = None, False
+        self.action, self.clear, self.unclear = None, False, False
         if fresh_text is None or not text.endswith(fresh_text):
             tail, fresh = "", text
         else:
@@ -542,6 +552,11 @@ class RefTracker:
                              _int(m.group("v2")), spoken=True):
                     found, self.action = self.format(), "ref"
             elif not (self.book and woke):
+                continue
+            elif book_was_misheard(combined, m.start()):
+                # "Turn to Habakook chapter 2": the book wasn't recognised. Never fall back to the
+                # previous book (that is how Psalm used to appear) - ask instead.
+                self.unclear = True
                 continue
             elif m.group("bc"):
                 if self._set(self.book, int(m.group("bc")), _int(m.group("bcv1")), _int(m.group("bcv2"))):
@@ -627,11 +642,64 @@ def _book_for(base_word, num):
     return None
 
 
-def scan_near_misses(text):
+# Words that can sit just before "chapter 4" / "verse 4" without being a book name.
+_CONTEXT_WORDS = {
+    "to", "the", "and", "in", "now", "then", "so", "our", "of", "from", "into", "at", "on", "onto", "see", "read",
+    "look", "go", "back", "same", "this", "that", "its", "it", "is", "also", "again", "with", "or", "let", "lets",
+    "us", "please", "turn", "open", "we", "you", "i", "a", "an", "are", "was", "were", "has", "have", "there",
+    "here", "say", "says", "said", "verse", "verses", "chapter", "next", "previous", "following", "roots",
+    "amen", "okay", "ok", "yes", "right", "well", "book", "bible", "reading", "where", "which", "what", "as",
+    "for", "by", "but", "if", "when", "till", "until", "start", "starting", "begin", "beginning", "down",
+    "up", "continue", "continuing", "jump", "onward", "onwards", "same", "very", "first", "second", "third",
+    "last", "end", "his", "her", "my", "your", "their", "all", "out", "about", "over", "through", "verse's",
+}
+
+
+def book_was_misheard(text, pos):
+    """True when the word just before position `pos` of the (already normalised) text looks like
+    a book name that wasn't recognised - 'turn to habakook chapter 2', 'open zefanaya 3 verse 17'.
+    'chapter 2' / 'verse 17' must then NOT be applied to whatever book was used before."""
+    before = text[:pos].split()
+    if len(before) >= 2 and before[-1].isdigit():   # "zefanaya 3 verse 17"
+        before = before[:-1]
+        if before and before[-1] == "chapter":
+            before = before[:-1]
+    if not before:
+        return False
+    w = before[-1]
+    if not w.isalpha() or len(w) < 3:
+        return False
+    return w not in SCRIPTURE_WORDS and w not in _CONTEXT_WORDS
+
+
+def guess_books(word, num=None, n=3):
+    """Books a misheard word probably meant, best first. Compares spelling and how it sounds,
+    so 'habakook' -> Habakkuk, 'zefanaya' -> Zephaniah, 'lamentasions' -> Lamentations."""
+    word = word.lower()
+    wkey = sound_key(word)
+    scored = {}
+    for base in BASE_TO_BOOKS:
+        spell = difflib.SequenceMatcher(None, word, base).ratio()
+        bkey = sound_key(base)
+        sound = (difflib.SequenceMatcher(None, wkey, bkey).ratio()
+                 if len(wkey) >= 3 and len(bkey) >= 3 and word[:1] == base[:1] else 0.0)
+        score = max(spell, 0.9 * sound)
+        if score < 0.7:
+            continue
+        book = _book_for(base, num)
+        # "Thessalonians" said without First/Second: offer both books
+        candidates = [book] if book else (sorted(BASE_TO_BOOKS[base]) if num is None else [])
+        for i, b in enumerate(candidates):
+            s = score - 0.01 * i
+            if s > scored.get(b, 0):
+                scored[b] = s
+    return [b for b, _ in sorted(scored.items(), key=lambda kv: -kv[1])][:n]
+
+
+def scan_near_misses(text, guesses=1):
     """Find 'almost' book names followed by a chapter number, e.g. 'habakuk 2 4' or
-    'first pita 2 9'. Returns [{'phrase','book','ch','v'}]."""
+    'first pita 2 9'. Returns [{'phrase','book','ch','v'}] - up to `guesses` books per phrase."""
     toks = words_to_digits(text).split()
-    bases = list(BASE_TO_BOOKS)
     out = []
     for i, w in enumerate(toks):
         if not w.isalpha() or len(w) < 4 or w in KNOWN_WORDS or w in _STOP_WORDS:
@@ -641,20 +709,18 @@ def scan_near_misses(text):
             j += 1
         if j >= len(toks) or not toks[j].isdigit():
             continue
-        close = difflib.get_close_matches(w, bases, n=1, cutoff=0.78)
-        if not close:
-            continue
         num, phrase = None, w
         if i > 0 and toks[i - 1] in PREFIX_NUM:
             num, phrase = PREFIX_NUM[toks[i - 1]], f"{toks[i - 1]} {w}"
-        book = _book_for(close[0], num)
-        if not book:
+        books = guess_books(w, num, n=guesses)
+        if not books:
             continue
         k = j + 1
         if k < len(toks) and toks[k] in ("verse", "verses", ":"):
             k += 1
         verse = int(toks[k]) if k < len(toks) and toks[k].isdigit() else None
-        out.append({"phrase": phrase, "book": book, "ch": int(toks[j]), "v": verse})
+        for book in books:
+            out.append({"phrase": phrase, "book": book, "ch": int(toks[j]), "v": verse, "pos": i})
     return out
 
 
@@ -690,7 +756,9 @@ def build_suggestions(tracker, near_misses=(), predict=True, limit=4):
             seen.add(ref)
             out.append({"label": label, "action": "send", "ref": ref, "learn": learn})
 
-    for m in list(near_misses)[::-1][:2]:
+    near_misses = list(near_misses)
+    last = max((m.get("pos", 0) for m in near_misses), default=0)
+    for m in [m for m in near_misses if m.get("pos", 0) == last][:3]:
         if not 1 <= m["ch"] <= CHAPTERS.get(m["book"], 150):
             continue
         ref = format_ref(m["book"], m["ch"], m["v"], None, sep)
@@ -824,7 +892,7 @@ def load_settings():
             s.update(json.load(f))
     except (OSError, ValueError):
         pass
-    return s
+    return upgrade_settings(s)
 
 
 def save_settings(s):
@@ -954,6 +1022,9 @@ def get_model(name, status=None, cancel=None):
     status = status or (lambda m: None)
     if name in _MODEL_CACHE:
         return _MODEL_CACHE[name]
+    ok, msg = check_speech_engine()
+    if not ok:
+        raise RuntimeError(msg)
     from faster_whisper import WhisperModel
 
     model, src = None, None
@@ -1047,9 +1118,910 @@ def find_device(sd, name):
     return None
 
 
+ACTIVE_LEVEL = 0.01          # average loudness above which an input is "hearing sound"
+_VIRTUAL_INPUTS = ("sound mapper", "primary sound capture")
+
+
+# ---- Recording with Windows' own winmm.dll, used when the 'sounddevice' library isn't installed ----
+_MM_ERRORS = {1: "an unspecified Windows audio error", 2: "that microphone isn't available (unplugged?)",
+              4: "it is already in use by another program", 6: "no driver is installed for it",
+              7: "Windows ran out of memory", 32: "it doesn't support this recording format"}
+
+
+def mm_error_text(code):
+    return _MM_ERRORS.get(int(code), f"Windows audio error {code}")
+
+
+class AudioUnavailable(Exception):
+    """No way to record: neither the sounddevice library nor Windows' own recording works."""
+
+
+class WinMMSound:
+    """The parts of the 'sounddevice' library RootsVoice uses (query_devices, InputStream), built on
+    Windows' own winmm.dll - so recording works even when sounddevice isn't installed. `dll` lets
+    the tests use a simulated driver."""
+    WAVE_MAPPER = 0xFFFFFFFF
+    DRVM_MAPPER_PREFERRED_GET = 0x2015
+
+    def __init__(self, dll=None):
+        import ctypes
+        from ctypes import wintypes
+        self.ct = ctypes
+        self.mm = dll if dll is not None else ctypes.windll.winmm
+
+        class WAVEINCAPSW(ctypes.Structure):
+            _fields_ = [("wMid", wintypes.WORD), ("wPid", wintypes.WORD), ("vDriverVersion", wintypes.UINT),
+                        ("szPname", wintypes.WCHAR * 32), ("dwFormats", wintypes.DWORD),
+                        ("wChannels", wintypes.WORD), ("wReserved1", wintypes.WORD)]
+
+        class WAVEFORMATEX(ctypes.Structure):
+            _fields_ = [("wFormatTag", wintypes.WORD), ("nChannels", wintypes.WORD),
+                        ("nSamplesPerSec", wintypes.DWORD), ("nAvgBytesPerSec", wintypes.DWORD),
+                        ("nBlockAlign", wintypes.WORD), ("wBitsPerSample", wintypes.WORD), ("cbSize", wintypes.WORD)]
+
+        class WAVEHDR(ctypes.Structure):
+            _fields_ = [("lpData", ctypes.c_void_p), ("dwBufferLength", wintypes.DWORD),
+                        ("dwBytesRecorded", wintypes.DWORD), ("dwUser", ctypes.c_size_t),
+                        ("dwFlags", wintypes.DWORD), ("dwLoops", wintypes.DWORD), ("lpNext", ctypes.c_void_p),
+                        ("reserved", ctypes.c_size_t)]
+
+        self.CAPS, self.FMT, self.HDR = WAVEINCAPSW, WAVEFORMATEX, WAVEHDR
+        if dll is None:      # the real DLL: declare argument types (64-bit handles and pointers)
+            P, m, U = ctypes.POINTER, self.mm, wintypes.UINT
+            m.waveInGetNumDevs.restype = U
+            m.waveInGetDevCapsW.argtypes = (ctypes.c_size_t, P(WAVEINCAPSW), U)
+            m.waveInOpen.argtypes = (P(ctypes.c_void_p), U, P(WAVEFORMATEX), ctypes.c_size_t, ctypes.c_size_t,
+                                     wintypes.DWORD)
+            for fn in ("waveInPrepareHeader", "waveInUnprepareHeader", "waveInAddBuffer"):
+                getattr(m, fn).argtypes = (ctypes.c_void_p, P(WAVEHDR), U)
+            for fn in ("waveInStart", "waveInStop", "waveInReset", "waveInClose"):
+                getattr(m, fn).argtypes = (ctypes.c_void_p,)
+            m.waveInMessage.argtypes = (ctypes.c_void_p, U, ctypes.c_size_t, ctypes.c_size_t)
+            for fn in ("waveInGetDevCapsW", "waveInOpen", "waveInPrepareHeader", "waveInUnprepareHeader",
+                       "waveInAddBuffer", "waveInStart", "waveInStop", "waveInReset", "waveInClose", "waveInMessage"):
+                getattr(m, fn).restype = U
+        self.mm.waveInGetNumDevs()   # fails here if Windows audio isn't usable at all
+
+    def _caps(self, dev_id):
+        caps = self.CAPS()
+        return caps if self.mm.waveInGetDevCapsW(dev_id, self.ct.pointer(caps), self.ct.sizeof(caps)) == 0 else None
+
+    def preferred(self):
+        """The id of Windows' default recording device, or None."""
+        dev, flags = self.ct.c_uint32(0), self.ct.c_uint32(0)
+        r = self.mm.waveInMessage(self.WAVE_MAPPER, self.DRVM_MAPPER_PREFERRED_GET,
+                                  self.ct.addressof(dev), self.ct.addressof(flags))
+        return int(dev.value) if r == 0 else None
+
+    def query_devices(self, device=None, kind=None):
+        devs = []
+        for i in range(int(self.mm.waveInGetNumDevs())):
+            caps = self._caps(i)          # list position = Windows device id, so keep a slot even on errors
+            devs.append({"name": caps.szPname if caps else f"Input {i + 1}",
+                         "max_input_channels": max(1, int(caps.wChannels)) if caps else 0,
+                         "default_samplerate": 48000})
+        if device is None and kind is None:
+            return devs
+        if device is None:
+            pref = self.preferred()
+            if pref is not None and 0 <= pref < len(devs):
+                return devs[pref]
+            return {"name": devs[0]["name"] if devs else "", "max_input_channels": 1, "default_samplerate": 48000}
+        return devs[int(device)]
+
+    def InputStream(self, samplerate, channels, dtype="float32", blocksize=None, device=None, callback=None):
+        return WinMMStream(self, self.WAVE_MAPPER if device is None else int(device), int(samplerate), int(channels),
+                           int(blocksize or samplerate // 10), callback)
+
+    def _terminate(self):
+        pass
+
+    def _initialize(self):
+        pass
+
+
+class WinMMStream:
+    """A recording from winmm.dll: a ring of buffers that Windows fills; a thread hands each full one on."""
+    WHDR_DONE = 1
+
+    def __init__(self, snd, dev_id, rate, channels, blocksize, callback, nbuf=6):
+        ct = snd.ct
+        self.snd, self.mm, self.cb, self.ch = snd, snd.mm, callback, channels
+        fmt = snd.FMT(1, channels, rate, rate * 2 * channels, 2 * channels, 16, 0)     # 16-bit PCM
+        self.h = ct.c_void_p()
+        r = self.mm.waveInOpen(ct.pointer(self.h), dev_id, ct.pointer(fmt), 0, 0, 0)
+        if r:
+            raise OSError(f"Windows couldn't open the microphone: {mm_error_text(r)}")
+        nbytes = blocksize * 2 * channels
+        self.bufs, self.hdrs = [], []
+        for _ in range(nbuf):
+            buf = ct.create_string_buffer(nbytes)
+            hdr = snd.HDR()
+            hdr.lpData, hdr.dwBufferLength = ct.cast(buf, ct.c_void_p), nbytes
+            self.mm.waveInPrepareHeader(self.h, ct.pointer(hdr), ct.sizeof(hdr))
+            self.mm.waveInAddBuffer(self.h, ct.pointer(hdr), ct.sizeof(hdr))
+            self.bufs.append(buf)
+            self.hdrs.append(hdr)
+        self.running, self.closed, self.thread, self.next = False, False, None, 0
+
+    def start(self):
+        r = self.mm.waveInStart(self.h)
+        if r:
+            self.close()
+            raise OSError(f"Windows couldn't start recording: {mm_error_text(r)}")
+        self.running = True
+        self.thread = threading.Thread(target=self._pump, daemon=True)
+        self.thread.start()
+
+    def _pump(self):
+        import numpy as np
+        ct = self.snd.ct
+        while self.running:
+            hdr = self.hdrs[self.next]
+            if not hdr.dwFlags & self.WHDR_DONE:
+                time.sleep(0.01)
+                continue
+            n = int(hdr.dwBytesRecorded)
+            if n and self.cb:
+                audio = np.frombuffer(ct.string_at(self.bufs[self.next], n), dtype="<i2").astype("float32") / 32768.0
+                self.cb(audio.reshape(-1, self.ch), len(audio) // self.ch, None, None)
+            hdr.dwFlags &= ~self.WHDR_DONE
+            if self.running:
+                self.mm.waveInAddBuffer(self.h, ct.pointer(hdr), ct.sizeof(hdr))
+            self.next = (self.next + 1) % len(self.hdrs)
+
+    def stop(self):
+        self.running = False
+        if self.thread is not None and self.thread is not threading.current_thread():
+            self.thread.join(1)
+        if not self.closed:
+            self.mm.waveInReset(self.h)
+
+    def close(self):
+        if self.closed:
+            return
+        self.running = False
+        self.mm.waveInReset(self.h)
+        for hdr in self.hdrs:
+            self.mm.waveInUnprepareHeader(self.h, self.snd.ct.pointer(hdr), self.snd.ct.sizeof(hdr))
+        self.mm.waveInClose(self.h)
+        self.closed = True
+
+
+_winmm_cache = []
+
+
+def winmm_sound():
+    """Windows' own recording, or None when not on Windows."""
+    if not _winmm_cache:
+        try:
+            _winmm_cache.append(WinMMSound())
+        except Exception:
+            _winmm_cache.append(None)
+    return _winmm_cache[0]
+
+
+def audio_module():
+    """The 'sounddevice' library if it is installed and works, otherwise Windows' own recording.
+    Raises AudioUnavailable with a message that says how to fix it."""
+    try:
+        import sounddevice as sd
+        return sd
+    except (ImportError, OSError) as e:
+        nat = winmm_sound()
+        if nat is not None:
+            return nat
+        if isinstance(e, ImportError):
+            raise AudioUnavailable(missing_package("sounddevice"))
+        raise AudioUnavailable(f"The microphone system could not start: {e}")
+
+
+def default_input_name(sd):
+    """The name of Windows' default microphone, or ''."""
+    try:
+        return str(dict(sd.query_devices(kind="input")).get("name") or "")
+    except Exception:
+        return ""
+
+
+# ---- Microphone health: driver problems, no microphone, Windows privacy blocking ----
+WIN_LINKS = {
+    "updates": ("Look for driver updates", "ms-settings:windowsupdate-optionalupdates"),
+    "devices": ("Open Device Manager", "devmgmt.msc"),
+    "privacy": ("Open microphone privacy settings", "ms-settings:privacy-microphone"),
+    "sound": ("Open Sound settings", "ms-settings:sound"),
+}
+DRIVER_PROBLEMS = {
+    1: "isn't set up correctly", 3: "has a damaged driver", 10: "can't start", 12: "has a resource conflict",
+    14: "needs the computer to restart", 18: "needs its driver reinstalled", 19: "has a settings problem",
+    21: "is being removed", 22: "is turned off (disabled)", 28: "has no driver installed",
+    31: "isn't working properly", 32: "has its driver turned off", 37: "has a driver that failed to load",
+    39: "has a missing or damaged driver", 43: "was stopped because it reported a problem",
+    48: "has a blocked driver", 52: "has a driver Windows can't verify",
+}
+
+
+def microphone_access_blocked():
+    """True when Windows privacy settings stop desktop programs from using the microphone."""
+    try:
+        import winreg
+    except ImportError:
+        return False
+    base = r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone"
+    for hive, key in ((winreg.HKEY_LOCAL_MACHINE, base), (winreg.HKEY_CURRENT_USER, base),
+                      (winreg.HKEY_CURRENT_USER, base + r"\NonPackaged")):
+        try:
+            with winreg.OpenKey(hive, key) as k:
+                if str(winreg.QueryValueEx(k, "Value")[0]).lower() == "deny":
+                    return True
+        except OSError:
+            continue
+    return False
+
+
+def parse_driver_problems(text):
+    """[(device name, problem, code)] from PowerShell's JSON list of devices with a problem code."""
+    try:
+        data = json.loads(text) if text and text.strip() else []
+    except ValueError:
+        return []
+    if isinstance(data, dict):
+        data = [data]
+    out = []
+    for d in data if isinstance(data, list) else []:
+        try:
+            code = int(d.get("ConfigManagerErrorCode") or 0)
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if code in (0, 24, 45):        # fine, or simply not plugged in right now
+            continue
+        out.append((d.get("Name") or "A sound device", DRIVER_PROBLEMS.get(code, f"has a problem (code {code})"), code))
+    return out
+
+
+def audio_driver_problems(timeout=12):
+    """Sound devices Windows reports a driver problem with (asks Windows via PowerShell)."""
+    if os.name != "nt":
+        return []
+    import subprocess
+    ps = ("Get-CimInstance Win32_PnPEntity | Where-Object { $_.ConfigManagerErrorCode -ne 0 -and "
+          "$_.PNPClass -in @('MEDIA','AudioEndpoint','AudioProcessingObject') } | "
+          "Select-Object Name, ConfigManagerErrorCode | ConvertTo-Json -Compress")
+    try:
+        result = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+                                capture_output=True, text=True, timeout=timeout,
+                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except Exception:
+        return []
+    return parse_driver_problems(result.stdout)
+
+
+def microphone_health(mic_count=None, problems=None, blocked=None):
+    """Things stopping the microphone that the person can fix, each with buttons:
+    [{'title', 'detail', 'actions': [(label, windows link)]}]."""
+    issues = []
+    if blocked is None:
+        blocked = microphone_access_blocked()
+    if blocked:
+        issues.append({"title": "Windows is blocking the microphone",
+                       "detail": "Turn on 'Microphone access' and 'Let desktop apps access your microphone' "
+                                 "in Windows privacy settings.",
+                       "actions": [WIN_LINKS["privacy"]]})
+    for name, problem, code in (audio_driver_problems() if problems is None else problems):
+        if code == 22:
+            issues.append({"title": f"'{name}' {problem}", "detail": "Turn it back on in Device Manager "
+                           "(right-click it \u203a Enable device).", "actions": [WIN_LINKS["devices"]]})
+        else:
+            issues.append({"title": f"'{name}' {problem}",
+                           "detail": "Install or update its driver: look in Windows Update \u203a Optional updates "
+                                     "\u203a Driver updates, or download it from the maker's website.",
+                           "actions": [WIN_LINKS["updates"], WIN_LINKS["devices"]]})
+    if mic_count is None:
+        try:
+            mic_count = len(list_microphones(audio_module()))
+        except Exception:
+            mic_count = None
+    if mic_count == 0:
+        issues.append({"title": "No microphone found",
+                       "detail": "Plug one in. If it is plugged in, Windows may be missing its driver - look for "
+                                 "driver updates, or download the driver from the maker's website.",
+                       "actions": [WIN_LINKS["sound"], WIN_LINKS["updates"], WIN_LINKS["devices"]]})
+    return issues
+
+
+def open_windows_link(target):
+    """Open a Windows settings page or tool, e.g. 'ms-settings:sound'. Returns True if it opened."""
+    try:
+        os.startfile(target)
+        return True
+    except Exception:
+        return False
+
+
+def list_microphones(sd, include_virtual=False):
+    """Input devices as (index, name, info), one per name. Windows lists the same microphone once per
+    sound system; the first listing is the most compatible, so later duplicates are skipped."""
+    out, seen = [], set()
+    for i, d in enumerate(sd.query_devices()):
+        name = d["name"]
+        if d.get("max_input_channels", 0) <= 0 or name in seen:
+            continue
+        if not include_virtual and any(v in name.lower() for v in _VIRTUAL_INPUTS):
+            continue
+        seen.add(name)
+        out.append((i, name, d))
+    return out
+
+
+def _to_16k_mono(rate, deliver):
+    """Microphone callback that turns any rate / channel count into the 16 kHz mono the speech model needs."""
+    import numpy as np
+
+    def callback(indata, frames, t, status):
+        x = np.asarray(indata, dtype="float32")
+        x = x.mean(axis=1) if x.ndim > 1 and x.shape[1] > 1 else x.reshape(-1)
+        if rate != SAMPLE_RATE and len(x):
+            n = max(1, int(round(len(x) * SAMPLE_RATE / rate)))
+            x = np.interp(np.linspace(0, len(x) - 1, n), np.arange(len(x)), x).astype("float32")
+        deliver(x.copy())
+
+    return callback
+
+
+def open_microphone(sd, device, deliver, block_seconds=0.1):
+    """Open a microphone in a format it accepts and pass 16 kHz mono audio to deliver(array).
+    Many microphones and USB interfaces refuse 16 kHz or a single channel, so several formats
+    are tried and the sound is converted. Returns (stream, info); raises if nothing works."""
+    try:
+        dev = dict(sd.query_devices(device) if device is not None else sd.query_devices(kind="input"))
+    except Exception:
+        dev = {}
+    native = int(dev.get("default_samplerate") or 48000)
+    maxch = max(1, int(dev.get("max_input_channels") or 1))
+    tries = []
+    for rate, ch in ((SAMPLE_RATE, 1), (native, 1), (native, min(2, maxch)), (48000, 1), (44100, 1),
+                     (48000, min(2, maxch)), (44100, min(2, maxch))):
+        if (rate, ch) not in tries:
+            tries.append((rate, ch))
+    last = None
+    for rate, ch in tries:
+        stream = None
+        try:
+            stream = sd.InputStream(samplerate=rate, channels=ch, dtype="float32",
+                                    blocksize=int(rate * block_seconds), device=device,
+                                    callback=_to_16k_mono(rate, deliver))
+            stream.start()
+            return stream, {"rate": rate, "channels": ch, "name": dev.get("name", "")}
+        except Exception as e:
+            last = e
+            try:
+                stream.close()
+            except Exception:
+                pass
+    raise last or RuntimeError("the microphone did not accept any audio format")
+
+
+def measure_microphone(sd, device, seconds=0.8):
+    """Listen for a moment. Returns (average loudness, info); raises if it can't be opened."""
+    import numpy as np
+    chunks = []
+    stream, info = open_microphone(sd, device, chunks.append)
+    time.sleep(seconds)
+    try:
+        stream.stop()
+        stream.close()
+    except Exception:
+        pass
+    audio = np.concatenate(chunks) if chunks else np.zeros(0, dtype="float32")
+    info["samples"] = len(audio)
+    return (float(np.sqrt(np.mean(audio * audio))) if len(audio) else 0.0), info
+
+
+def scan_microphones(seconds=0.8, progress=None, cancel=None):
+    """Listen to every input in turn. Returns [{'name', 'ok', 'level', 'rate', 'note', 'loopback'}]."""
+    sd = audio_module()
+    mics = list_microphones(sd)
+    results = []
+    for n, (idx, name, d) in enumerate(mics, 1):
+        if cancel is not None and cancel.is_set():
+            break
+        if progress:
+            progress(n, len(mics), name)
+        loopback = any(w in name.lower() for w in ("stereo mix", "what u hear", "loopback", "wave out"))
+        entry = {"name": name, "ok": False, "level": 0.0, "rate": None, "note": "", "loopback": loopback}
+        try:
+            level, info = measure_microphone(sd, idx, seconds)
+            entry["rate"] = info["rate"]
+            if not info["samples"]:
+                entry["note"] = "Opened, but no sound arrived"
+            else:
+                entry["ok"], entry["level"] = True, level
+                entry["note"] = "Hearing sound" if level > ACTIVE_LEVEL else "Works, but quiet right now"
+            if info["rate"] != SAMPLE_RATE:
+                entry["note"] += f" \u00b7 {info['rate'] // 1000} kHz, converted"
+        except Exception as e:
+            entry["note"] = "Can't be used: " + (str(e).splitlines() or ["unknown error"])[0][:70]
+        if loopback:
+            entry["note"] += " \u00b7 the computer's own sound, not a microphone"
+        results.append(entry)
+    return results
+
+
+def best_microphone(results):
+    """The input hearing the most sound (never 'Stereo Mix'-style loopback), or None if all are quiet."""
+    ok = [r for r in results if r["ok"] and not r["loopback"]]
+    if not ok:
+        return None
+    best = max(ok, key=lambda r: r["level"])
+    return best if best["level"] > ACTIVE_LEVEL else None
+
+
 # --------------------------------------------------------------------------
-# VIDEOPSALM CONTROL
+# PROJECTION SOFTWARE - VideoPsalm, BibleShow, EasyWorship, ProPresenter, OpenLP, FreeShow, others
 # --------------------------------------------------------------------------
+# kind "keys": RootsVoice brings the program to the front, opens its reference box (with a shortcut,
+#              or by clicking a spot you showed it once), clears it and types the reference.
+# kind "freeshow": FreeShow's own API - nothing is typed.
+TARGETS = {
+    "videopsalm": {"name": "VideoPsalm", "kind": "keys",
+                   "note": "VideoPsalm's search opens with Ctrl+F - nothing else to set up.",
+                   "defaults": {"window_title": "VideoPsalm", "focus": "hotkey", "search_hotkey": "ctrl+f",
+                                "after_keys": "enter"}},
+    "bibleshow": {"name": "BibleShow", "kind": "keys",
+                  "note": "BibleShow's reference box opens with F5 - RootsVoice presses F5, types the reference "
+                          "(e.g. John 3:16) and presses Enter. Nothing else to set up.",
+                  "defaults": {"window_title": "BibleShow", "focus": "hotkey", "search_hotkey": "f5",
+                               "after_keys": "enter"}},
+    "easyworship": {"name": "EasyWorship", "kind": "keys",
+                    "note": "Open the Scriptures tab, then press 'Point to it' and hold the mouse over its "
+                            "reference box.",
+                    "defaults": {"window_title": "EasyWorship", "focus": "click", "after_keys": "enter"}},
+    "propresenter": {"name": "ProPresenter", "kind": "keys",
+                     "note": "Open the Bible panel, then press 'Point to it' and hold the mouse over its "
+                             "reference box. ProPresenter's clear keys (F1-F6) can be used as the Clear key.",
+                     "defaults": {"window_title": "ProPresenter", "focus": "click", "after_keys": "enter"}},
+    "openlp": {"name": "OpenLP", "kind": "keys",
+               "note": "Open the Bibles tab (Quick search), then press 'Point to it' and hold the mouse over "
+                       "the search box.",
+               "defaults": {"window_title": "OpenLP", "focus": "click", "after_keys": "enter"}},
+    "freeshow": {"name": "FreeShow", "kind": "freeshow",
+                 "note": "Uses FreeShow's own API - turn it on in FreeShow › Settings › Connections. "
+                         "Nothing is typed, so FreeShow can stay in the background.",
+                 "defaults": {"window_title": "FreeShow", "api_port": 5506, "api_key": ""}},
+    "custom": {"name": "Other program", "kind": "keys",
+               "note": "Works with any program that has a box for typing a Bible reference. Type part of its "
+                       "window title, then press 'Point to it' (or set its search shortcut).",
+               "defaults": {"window_title": "", "focus": "click", "after_keys": "enter"}},
+}
+TARGET_FIELDS = ("window_title", "focus", "search_hotkey", "after_keys", "next_key", "prev_key", "clear_key",
+                 "click_x", "click_y", "api_port", "api_key")
+_TARGET_BLANK = {"window_title": "", "focus": "click", "search_hotkey": "", "after_keys": "enter", "next_key": "",
+                 "prev_key": "", "clear_key": "", "click_x": None, "click_y": None, "api_port": 5506, "api_key": ""}
+
+
+def target_id(settings):
+    tid = settings.get("target") or "videopsalm"
+    return tid if tid in TARGETS else "custom"
+
+
+def target_profile(settings):
+    return TARGETS[target_id(settings)]
+
+
+def target_values(tid, saved=None):
+    """Settings for one program: its defaults, overlaid with what you changed for it."""
+    defaults = TARGETS.get(tid, TARGETS["custom"])["defaults"]
+    vals = dict(_TARGET_BLANK)
+    vals.update(defaults)
+    saved = {k: v for k, v in (saved or {}).items() if k in TARGET_FIELDS}
+    if _never_pointed(defaults, saved):
+        saved.pop("focus", None)
+        saved.pop("search_hotkey", None)
+    vals.update(saved)
+    return vals
+
+
+def _never_pointed(defaults, saved):
+    """True for settings saved while a program still needed pointing, when it now has a known shortcut
+    and the box was never pointed to (BibleShow before 2.2.1)."""
+    return (defaults.get("focus") == "hotkey" and saved.get("focus") == "click"
+            and saved.get("click_x") is None)
+
+
+def upgrade_settings(s):
+    """Bring settings saved by an older RootsVoice up to date."""
+    tid = target_id(s)
+    defaults = TARGETS[tid]["defaults"]
+    if _never_pointed(defaults, s):
+        s["focus"], s["search_hotkey"] = defaults["focus"], defaults["search_hotkey"]
+    return s
+
+
+def target_name(settings):
+    if target_id(settings) == "custom":
+        return (settings.get("window_title") or "").strip() or "your projection software"
+    return target_profile(settings)["name"]
+
+
+# ---- Typing, clicking and window control with Windows' own functions (no extra packages) ----
+# pyautogui / pygetwindow are only used where Windows' functions aren't available.
+_EXTENDED_KEYS = {"up", "down", "left", "right", "home", "end", "pageup", "pagedown", "insert", "delete", "win"}
+_VK_NAMES = {
+    "enter": 0x0D, "return": 0x0D, "tab": 0x09, "esc": 0x1B, "escape": 0x1B, "space": 0x20, "backspace": 0x08,
+    "delete": 0x2E, "del": 0x2E, "insert": 0x2D, "up": 0x26, "down": 0x28, "left": 0x25, "right": 0x27,
+    "home": 0x24, "end": 0x23, "pageup": 0x21, "pgup": 0x21, "pagedown": 0x22, "pgdn": 0x22,
+    "ctrl": 0x11, "control": 0x11, "alt": 0x12, "shift": 0x10, "win": 0x5B,
+}
+_KEY_ALIASES = {"pgup": "pageup", "pgdn": "pagedown", "del": "delete", "return": "enter", "escape": "esc",
+                "control": "ctrl"}
+
+
+def key_code(name):
+    """Windows key code for a key name: 'f5', 'enter', 'ctrl', 'a', '7', 'pagedown' ... Raises ValueError."""
+    k = name.strip().lower()
+    if k in _VK_NAMES:
+        return _VK_NAMES[k]
+    if len(k) == 1 and ("a" <= k <= "z" or "0" <= k <= "9"):
+        return ord(k.upper())
+    if k.startswith("f") and k[1:].isdigit() and 1 <= int(k[1:]) <= 24:
+        return 0x6F + int(k[1:])
+    raise ValueError(f"Unknown key '{name}'")
+
+
+class NativeWindows:
+    """Windows' own SendInput / window functions. Types text as real characters, so it works
+    with any keyboard layout (pyautogui's typing breaks ':' on some layouts)."""
+
+    def __init__(self):
+        import ctypes
+        from ctypes import wintypes
+        self.ct, self.wt = ctypes, wintypes
+        self.user32, self.kernel32 = ctypes.windll.user32, ctypes.windll.kernel32
+        ULONG_PTR = ctypes.c_size_t
+
+        class KEYBDINPUT(ctypes.Structure):
+            _fields_ = [("wVk", wintypes.WORD), ("wScan", wintypes.WORD), ("dwFlags", wintypes.DWORD),
+                        ("time", wintypes.DWORD), ("dwExtraInfo", ULONG_PTR)]
+
+        class MOUSEINPUT(ctypes.Structure):
+            _fields_ = [("dx", wintypes.LONG), ("dy", wintypes.LONG), ("mouseData", wintypes.DWORD),
+                        ("dwFlags", wintypes.DWORD), ("time", wintypes.DWORD), ("dwExtraInfo", ULONG_PTR)]
+
+        class HARDWAREINPUT(ctypes.Structure):
+            _fields_ = [("uMsg", wintypes.DWORD), ("wParamL", wintypes.WORD), ("wParamH", wintypes.WORD)]
+
+        class _U(ctypes.Union):
+            _fields_ = [("ki", KEYBDINPUT), ("mi", MOUSEINPUT), ("hi", HARDWAREINPUT)]
+
+        class INPUT(ctypes.Structure):
+            _fields_ = [("type", wintypes.DWORD), ("u", _U)]
+
+        self.INPUT, self.U, self.KEYBDINPUT, self.MOUSEINPUT = INPUT, _U, KEYBDINPUT, MOUSEINPUT
+        u = self.user32
+        u.SendInput.argtypes = (wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int)
+        u.SendInput.restype = wintypes.UINT
+        for fn in ("IsIconic", "IsWindowVisible", "SetForegroundWindow", "BringWindowToTop"):
+            getattr(u, fn).argtypes = (wintypes.HWND,)
+        u.GetForegroundWindow.restype = wintypes.HWND
+        u.ShowWindow.argtypes = (wintypes.HWND, ctypes.c_int)
+        u.GetWindowTextLengthW.argtypes = (wintypes.HWND,)
+        u.GetWindowTextW.argtypes = (wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)
+        u.GetWindowRect.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.RECT))
+        u.GetWindowThreadProcessId.argtypes = (wintypes.HWND, ctypes.c_void_p)
+        u.GetWindowThreadProcessId.restype = wintypes.DWORD
+        u.AttachThreadInput.argtypes = (wintypes.DWORD, wintypes.DWORD, wintypes.BOOL)
+
+    # ---- keyboard and mouse
+    def _send(self, *inputs):
+        arr = (self.INPUT * len(inputs))(*inputs)
+        if self.user32.SendInput(len(inputs), arr, self.ct.sizeof(self.INPUT)) != len(inputs):
+            raise OSError("Windows blocked the key presses (is the program running as administrator?)")
+
+    def _key(self, vk=0, scan=0, flags=0):
+        return self.INPUT(type=1, u=self.U(ki=self.KEYBDINPUT(vk, scan, flags, 0, 0)))
+
+    def hotkey(self, *names):
+        """Press keys together, e.g. hotkey('ctrl', 'a') or hotkey('f5')."""
+        codes = [(key_code(n), 1 if _KEY_ALIASES.get(n.lower(), n.lower()) in _EXTENDED_KEYS else 0)
+                 for n in names]
+        downs = [self._key(vk, 0, ext) for vk, ext in codes]
+        ups = [self._key(vk, 0, ext | 2) for vk, ext in reversed(codes)]
+        self._send(*(downs + ups))
+
+    def press(self, name):
+        self.hotkey(name)
+
+    def typewrite(self, text, interval=0.0):
+        """Type text as characters (KEYEVENTF_UNICODE) - independent of the keyboard layout."""
+        for ch in text:
+            code = ord(ch)
+            self._send(self._key(0, code, 4), self._key(0, code, 4 | 2))
+            if interval:
+                time.sleep(interval)
+
+    def click(self, x, y):
+        self.user32.SetCursorPos(int(x), int(y))
+        time.sleep(0.03)
+        mi = lambda flags: self.INPUT(type=0, u=self.U(mi=self.MOUSEINPUT(0, 0, 0, flags, 0, 0)))
+        self._send(mi(0x0002), mi(0x0004))            # left button down, up
+
+    def position(self):
+        pt = self.wt.POINT()
+        self.user32.GetCursorPos(self.ct.byref(pt))
+        return pt.x, pt.y
+
+    # ---- windows
+    def windows(self):
+        """Visible top-level windows that have a title."""
+        found = []
+        u = self.user32
+
+        @self.ct.WINFUNCTYPE(self.wt.BOOL, self.wt.HWND, self.wt.LPARAM)
+        def each(hwnd, _):
+            if u.IsWindowVisible(hwnd):
+                n = u.GetWindowTextLengthW(hwnd)
+                if n:
+                    buf = self.ct.create_unicode_buffer(n + 1)
+                    u.GetWindowTextW(hwnd, buf, n + 1)
+                    if buf.value.strip():
+                        found.append(NativeWindow(self, hwnd, buf.value))
+            return True
+
+        u.EnumWindows(each, 0)
+        return found
+
+
+class NativeWindow:
+    """One window, with the same handful of properties RootsVoice used from pygetwindow."""
+
+    def __init__(self, nat, hwnd, title):
+        self.nat, self.hwnd, self.title = nat, hwnd, title
+
+    def _rect(self):
+        r = self.nat.wt.RECT()
+        self.nat.user32.GetWindowRect(self.hwnd, self.nat.ct.byref(r))
+        return r
+
+    left = property(lambda self: self._rect().left)
+    top = property(lambda self: self._rect().top)
+    width = property(lambda self: self._rect().right - self._rect().left)
+    height = property(lambda self: self._rect().bottom - self._rect().top)
+    isMinimized = property(lambda self: bool(self.nat.user32.IsIconic(self.hwnd)))
+
+    def restore(self):
+        self.nat.user32.ShowWindow(self.hwnd, 9)        # SW_RESTORE
+
+    def activate(self):
+        """Bring to the front. Windows only lets the program the user last used do this, so a quick
+        Alt tap (and, if needed, sharing the input queue) is used - the usual, harmless workaround."""
+        u = self.nat.user32
+        if u.GetForegroundWindow() == self.hwnd:
+            return
+        u.keybd_event(0x12, 0, 0, 0)
+        u.keybd_event(0x12, 0, 2, 0)
+        u.SetForegroundWindow(self.hwnd)
+        if u.GetForegroundWindow() != self.hwnd:
+            fg_thread = u.GetWindowThreadProcessId(u.GetForegroundWindow(), None)
+            me = self.nat.kernel32.GetCurrentThreadId()
+            u.AttachThreadInput(me, fg_thread, True)
+            u.BringWindowToTop(self.hwnd)
+            u.SetForegroundWindow(self.hwnd)
+            u.AttachThreadInput(me, fg_thread, False)
+        if u.GetForegroundWindow() != self.hwnd:
+            raise OSError("Windows would not switch to it - click it once, then try again")
+
+
+_native_cache = []
+
+
+def native_windows():
+    """NativeWindows on Windows, otherwise None."""
+    if not _native_cache:
+        try:
+            _native_cache.append(NativeWindows())
+        except Exception:
+            _native_cache.append(None)
+    return _native_cache[0]
+
+
+def missing_package(name):
+    """A message that says how to fix a missing library."""
+    if FROZEN:
+        return f"Part of RootsVoice is missing ({name}). Please reinstall RootsVoice with the latest installer."
+    return (f"Missing package: {name}. RootsVoice can install it for you (Help \u203a Install missing components), "
+            f'or run:  "{sys.executable}" -m pip install {name}')
+
+
+# --------------------------------------------------------------------------
+# COMPONENTS - the libraries RootsVoice needs, and installing them from inside the app
+# --------------------------------------------------------------------------
+WINDOWS = os.name == "nt"
+COMPONENTS = [   # import name, pip name, what it does, required (the rest have a built-in Windows fallback)
+    ("faster_whisper", "faster-whisper", "the speech engine that turns speech into text", True),
+    ("numpy", "numpy", "sound processing", True),
+    ("sounddevice", "sounddevice", "microphone access (Windows has a built-in fallback)", not WINDOWS),
+    ("pyautogui", "pyautogui", "typing into the projection software (Windows has a built-in fallback)", not WINDOWS),
+    ("pygetwindow", "pygetwindow", "finding the projection software (Windows has a built-in fallback)", not WINDOWS),
+]
+VC_RUNTIME_URL = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
+VC_RUNTIME_MSG = ("The speech engine needs Microsoft's Visual C++ runtime, which is missing on this computer. "
+                  f"Download and install it from {VC_RUNTIME_URL} , then restart RootsVoice.")
+
+
+def has_module(name):
+    """Is this library installed? (Quick check - it isn't loaded.)"""
+    if name in sys.modules:
+        return sys.modules[name] is not None
+    try:
+        import importlib.util
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def missing_dependencies(include_optional=True):
+    """[(pip name, what it does, required)] for components that aren't installed."""
+    return [(pip, why, req) for mod, pip, why, req in COMPONENTS
+            if (req or include_optional) and not has_module(mod)]
+
+
+def needs_install():
+    return any(req for _, _, req in missing_dependencies())
+
+
+def python_version_note():
+    """A warning when this Python is outside the versions the speech engine is built for, else ''."""
+    v = sys.version_info[:2]
+    if (3, 9) <= v <= (3, 13):
+        return ""
+    return (f"This computer runs Python {v[0]}.{v[1]}. The speech engine is built for Python 3.9 - 3.13; if "
+            "installing fails, double-click setup_rootsvoice.bat in the RootsVoice folder - it installs Python 3.11 "
+            "and everything else for you.")
+
+
+def check_speech_engine():
+    """Really load the speech engine. Returns (True, 'ready') or (False, what to do)."""
+    try:
+        import faster_whisper  # noqa: F401
+        return True, "ready"
+    except ImportError as e:
+        if "dll load failed" in str(e).lower():
+            return False, VC_RUNTIME_MSG
+        name = (getattr(e, "name", None) or "faster_whisper").split(".")[0]
+        return False, missing_package("faster-whisper" if name == "faster_whisper" else name.replace("_", "-"))
+    except OSError as e:          # a DLL inside the engine couldn't be loaded
+        return False, VC_RUNTIME_MSG if "dll" in str(e).lower() or WINDOWS else f"The speech engine couldn't load: {e}"
+
+
+def _stream_command(cmd, log):
+    """Run a command, passing each line of its output to log(). Returns (exit code, all output)."""
+    import subprocess
+    try:
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace",
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except OSError as e:
+        return 1, str(e)
+    lines = []
+    for line in p.stdout:
+        lines.append(line)
+        log(line.rstrip())
+    return p.wait(), "".join(lines)
+
+
+def explain_pip_failure(out):
+    """Turn pip's output into one plain sentence about what to do."""
+    low = out.lower()
+    if any(k in low for k in ("failed to establish a new connection", "could not fetch url", "name resolution",
+                              "getaddrinfo failed", "network is unreachable", "connection timed out",
+                              "read timed out", "connection aborted", "proxyerror")):
+        return "No internet connection - connect to the internet and try again (it's only needed once)."
+    if "no matching distribution" in low or "could not find a version that satisfies" in low:
+        v = sys.version_info
+        return (f"The speech engine isn't available for Python {v[0]}.{v[1]}. Double-click setup_rootsvoice.bat "
+                "in the RootsVoice folder - it installs Python 3.11 and everything else for you.")
+    if "microsoft visual c++" in low or "subprocess-exited-with-error" in low or "failed building wheel" in low:
+        return ("A component couldn't be built on this computer. Double-click setup_rootsvoice.bat - it uses "
+                "Python 3.11, which has ready-made versions of everything.")
+    if "no space left" in low or "not enough space" in low:
+        return "The disk is full - free up about 1 GB and try again."
+    if "permission" in low or "access is denied" in low:
+        return "Windows refused the install. Run setup_rootsvoice.bat, or start RootsVoice as administrator once."
+    last = [line.strip() for line in out.splitlines() if line.strip()][-1:]
+    return "Installing failed: " + (last[0][:200] if last else "unknown error")
+
+
+def install_packages(packages, log=print, run=None):
+    """Install libraries with pip into the Python that is running RootsVoice. Returns (ok, message)."""
+    if FROZEN:
+        return False, "This is the installed RootsVoice - please reinstall it with the latest Setup file."
+    if not packages:
+        return True, "Everything is already installed."
+    run = run or _stream_command
+    py = sys.executable
+    if py.lower().endswith("pythonw.exe") and os.path.exists(py[:-5] + ".exe"):
+        py = py[:-5] + ".exe"                       # the console version shows pip's messages
+    code, out = run([py, "-m", "pip", "--version"], log)
+    if code != 0:
+        log("Setting up pip (the package installer)...")
+        code, out = run([py, "-m", "ensurepip", "--upgrade"], log)
+        if code != 0:
+            return False, ("This Python has no package installer (pip). Double-click setup_rootsvoice.bat - "
+                           "it installs Python 3.11 with everything RootsVoice needs.")
+    cmd = [py, "-m", "pip", "install", "--upgrade", "--disable-pip-version-check", *packages]
+    code, out = run(cmd, log)
+    if code != 0 and ("permission" in out.lower() or "access is denied" in out.lower()):
+        log("Trying again for this Windows user only...")
+        code, out = run(cmd + ["--user"], log)
+    if code == 0:
+        return True, "Installed " + ", ".join(packages) + ". Restart RootsVoice to start using them."
+    return False, explain_pip_failure(out)
+
+
+def make_desktop_shortcut():
+    """Put a 'RootsVoice' shortcut (with the Roots icon) on the desktop. Returns (ok, message)."""
+    if not WINDOWS:
+        return False, "Desktop shortcuts are made on Windows only."
+    import subprocess
+    pyw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+    target = sys.executable if FROZEN else (pyw if os.path.exists(pyw) else sys.executable)
+    env = dict(os.environ, RV_TARGET=target, RV_ARGS="" if FROZEN else f'"{os.path.abspath(__file__)}"',
+               RV_DIR=APP_DIR, RV_ICON=os.path.join(APP_DIR, "assets", "roots.ico"))
+    # paths travel in environment variables, so spaces or quotes in folder names can't break the command
+    ps = ("$d=[Environment]::GetFolderPath('Desktop');"
+          "$s=(New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path $d 'RootsVoice.lnk'));"
+          "$s.TargetPath=$env:RV_TARGET;$s.Arguments=$env:RV_ARGS;$s.WorkingDirectory=$env:RV_DIR;"
+          "if(Test-Path $env:RV_ICON){$s.IconLocation=$env:RV_ICON};"
+          "$s.Description='RootsVoice - voice-controlled scripture';$s.Save()")
+    try:
+        r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps], env=env,
+                           capture_output=True, text=True, timeout=30,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except Exception as e:
+        return False, f"Couldn't make the shortcut: {e}"
+    return (r.returncode == 0,
+            "Desktop shortcut made." if r.returncode == 0 else f"Couldn't make the shortcut: {r.stderr.strip()[:150]}")
+
+
+def component_lines():
+    """[(ok, message)] for Check setup and --check-deps."""
+    out = []
+    for mod, pip, why, req in COMPONENTS:
+        if mod == "faster_whisper":
+            ok, msg = check_speech_engine()
+            out.append((ok, f"Speech engine (faster-whisper): {'installed' if ok else msg}"))
+        elif has_module(mod):
+            out.append((True, f"{pip}: installed"))
+        elif req:
+            out.append((False, f"{pip} ({why}): missing - Help \u203a Install missing components"))
+        else:
+            out.append((True, f"{pip}: not installed - using Windows' built-in version"))
+    return out
+
+
+def input_backend():
+    """(keyboard-and-mouse object, None) or (None, error message)."""
+    nat = native_windows()
+    if nat is not None:
+        return nat, None
+    try:
+        import pyautogui
+        return pyautogui, None
+    except ImportError:
+        return None, missing_package("pyautogui")
+
+
+def window_titles_and_finder():
+    """(list of windows, None) or (None, error message). Each window has .title, .left, .top ..."""
+    nat = native_windows()
+    if nat is not None:
+        return nat.windows(), None
+    try:
+        import pygetwindow as gw
+    except ImportError:
+        return None, missing_package("pygetwindow")
+    return gw, None
+
+
 _send_lock = threading.Lock()  # sends never overlap, so keystrokes can't interleave
 
 
@@ -1058,92 +2030,229 @@ def _keys(spec):
     return [k.strip().lower() for k in spec.split("+") if k.strip()]
 
 
-def _focus_videopsalm(settings):
-    """Bring VideoPsalm to the front. Returns (pyautogui, None) or (None, error message)."""
-    try:
-        import pyautogui
-        import pygetwindow as gw
-    except ImportError as e:
-        return None, f"Missing package: {e.name}"
-    wins = [w for w in gw.getWindowsWithTitle(settings["window_title"]) if w.title.strip()]
+def find_target_window(settings):
+    """The projection program's window. Returns (window, None) or (None, error message)."""
+    title = (settings.get("window_title") or "").strip()
+    if not title:
+        return None, "Type part of the program's window title in Settings › Projection software."
+    source, err = window_titles_and_finder()
+    if err:
+        return None, err
+    if isinstance(source, list):          # Windows' own window list
+        wins = [w for w in source if title.lower() in w.title.lower()]
+    else:                                 # pygetwindow
+        wins = source.getWindowsWithTitle(title)
+    wins = [w for w in wins if w.title.strip() and "RootsVoice" not in w.title]
     if not wins:
-        return None, f"VideoPsalm window not found (looking for '{settings['window_title']}')"
-    win = wins[0]
+        return None, f"{target_name(settings)} window not found (looking for '{title}'). Is it open?"
+    return wins[0], None
+
+
+def _focus_target(settings):
+    """Bring the projection program to the front. Returns (keyboard, window, None) or (None, None, error)."""
+    inp, err = input_backend()
+    if err:
+        return None, None, err
+    win, err = find_target_window(settings)
+    if err:
+        return None, None, err
     try:
         if win.isMinimized:
             win.restore()
         win.activate()
-    except Exception as e:  # pygetwindow can raise odd errors on activate
-        return None, f"Could not focus VideoPsalm: {e}"
+    except Exception as e:
+        return None, None, f"Could not bring {target_name(settings)} to the front: {e}"
     time.sleep(0.3)
-    return pyautogui, None
+    return inp, win, None
 
 
-def send_to_videopsalm(ref, settings):
-    """Focus VideoPsalm, open search, CLEAR the box, type the reference. Returns (ok, message)."""
+def send_reference(ref, settings):
+    """Show `ref` in the chosen projection software. Each new reference replaces the last.
+    Returns (ok, message)."""
+    if target_profile(settings)["kind"] == "freeshow":
+        return freeshow_call(settings, "start_scripture", {"reference": ref}, f"Sent {ref}")
+    if settings.get("focus") == "click" and (settings.get("click_x") is None or settings.get("click_y") is None):
+        return False, (f"Show RootsVoice where {target_name(settings)}'s reference box is: "
+                       "Settings › Projection software › Point to it.")
     with _send_lock:
-        pyautogui, err = _focus_videopsalm(settings)
+        keys, win, err = _focus_target(settings)
         if err:
             return False, err
-        pyautogui.hotkey(*_keys(settings["search_hotkey"]))
-        time.sleep(0.25)
-        pyautogui.hotkey("ctrl", "a")      # select whatever was there before...
-        time.sleep(0.08)
-        pyautogui.press("backspace")       # ...and delete it, so the new reference overwrites it
-        time.sleep(0.08)
-        pyautogui.typewrite(ref, interval=0.015)
-        time.sleep(0.15)
-        for key in [k.strip() for k in settings["after_keys"].split(",") if k.strip()]:
-            pyautogui.hotkey(*_keys(key))
+        try:
+            if settings.get("focus") == "click":
+                keys.click(win.left + int(settings["click_x"]), win.top + int(settings["click_y"]))
+                time.sleep(0.15)
+            else:
+                keys.hotkey(*_keys(settings.get("search_hotkey") or "ctrl+f"))
+                time.sleep(0.25)
+            keys.hotkey("ctrl", "a")      # select whatever was there before...
+            time.sleep(0.08)
+            keys.press("backspace")       # ...and delete it, so the new reference overwrites it
+            time.sleep(0.08)
+            keys.typewrite(ref, interval=0.015)
             time.sleep(0.15)
+            for key in [k.strip() for k in (settings.get("after_keys") or "").split(",") if k.strip()]:
+                keys.hotkey(*_keys(key))
+                time.sleep(0.15)
+        except Exception as e:
+            return False, f"Couldn't type into {target_name(settings)}: {e}"
     return True, f"Sent {ref}"
 
 
-def press_in_videopsalm(keys, settings, label):
-    """Focus VideoPsalm and press a key or combo, e.g. 'down' or 'ctrl+right'. Returns (ok, message)."""
+def press_in_target(keys, settings, label, api_action=None):
+    """Press a key or combo in the projection program, e.g. 'down' or 'f2'.
+    FreeShow is told through its API instead (`api_action`). Returns (ok, message)."""
+    if target_profile(settings)["kind"] == "freeshow":
+        if api_action:
+            return freeshow_call(settings, api_action, None, label)
+        return False, "FreeShow is controlled through its API - no keys are needed."
     with _send_lock:
-        pyautogui, err = _focus_videopsalm(settings)
+        inp, win, err = _focus_target(settings)
         if err:
             return False, err
-        for key in [k.strip() for k in keys.split(",") if k.strip()]:
-            pyautogui.hotkey(*_keys(key))
-            time.sleep(0.1)
+        try:
+            for key in [k.strip() for k in keys.split(",") if k.strip()]:
+                inp.hotkey(*_keys(key))
+                time.sleep(0.1)
+        except Exception as e:
+            return False, f"Couldn't press '{keys}' in {target_name(settings)}: {e}"
     return True, label
+
+
+send_to_videopsalm, press_in_videopsalm = send_reference, press_in_target   # names used by RootsVoice 2.1
+
+
+def freeshow_call(settings, action, data=None, label="Done"):
+    """Send one action to FreeShow's API (REST), e.g. start_scripture {"reference": "John 3:16"}."""
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+    try:
+        port = int(settings.get("api_port") or 5506)
+    except (TypeError, ValueError):
+        port = 5506
+    key = (settings.get("api_key") or "").strip()
+    payload = {"action": action}
+    payload.update(data or {})
+    headers = {"Content-Type": "application/json"}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    url = f"http://127.0.0.1:{port}"
+    try:
+        req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
+        urllib.request.urlopen(req, timeout=3).close()
+        return True, label
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            return False, "FreeShow refused the request - check the API key in Settings › Projection software."
+        if e.code in (404, 405):      # other FreeShow versions take the action in the address instead
+            query = {"action": action, "data": json.dumps(data or {})}
+            if key:
+                query["auth"] = key
+            try:
+                urllib.request.urlopen(f"{url}/?{urllib.parse.urlencode(query)}", timeout=3).close()
+                return True, label
+            except Exception as e2:
+                return False, f"FreeShow did not accept the request ({e2})."
+        return False, f"FreeShow replied with error {e.code}."
+    except OSError:
+        return False, (f"Can't reach FreeShow on port {port}. Open FreeShow and turn on its API "
+                       "(Settings › Connections).")
+
+
+def detect_open_programs():
+    """Supported programs that are open right now, e.g. ['bibleshow']."""
+    source, err = window_titles_and_finder()
+    if err:
+        return []
+    try:
+        raw = [w.title for w in source] if isinstance(source, list) else source.getAllTitles()
+        titles = [t.lower() for t in raw if t.strip() and "rootsvoice" not in t.lower()]
+    except Exception:
+        return []
+    found = []
+    for tid, t in TARGETS.items():
+        word = (t["defaults"].get("window_title") or "").lower()
+        if word and any(word in title for title in titles):
+            found.append(tid)
+    return found
+
+
+def pointer_offset(settings):
+    """Where the mouse is, measured from the projection program's top-left corner.
+    Returns ((x, y), None) or (None, error message)."""
+    inp, err = input_backend()
+    if err:
+        return None, err
+    win, err = find_target_window(settings)
+    if err:
+        return None, err
+    pos = inp.position()
+    x, y = int(pos[0]) - int(win.left), int(pos[1]) - int(win.top)
+    if not (0 <= x < int(win.width) and 0 <= y < int(win.height)):
+        return None, f"The mouse wasn't over {target_name(settings)}'s window - try again."
+    return (x, y), None
 
 
 # --------------------------------------------------------------------------
 # SETUP CHECK - one click to confirm the computer is ready for a service
 # --------------------------------------------------------------------------
 def setup_check(settings):
-    """[(ok, message)] for the microphone, speech model, VideoPsalm and typing."""
-    out = []
+    """[(ok, message)] for components, the microphone, speech model, projection software and typing."""
+    out = [line for line in component_lines() if not line[0] or "Speech engine" in line[1]]
     try:
-        import sounddevice as sd
-        mics = [d for d in sd.query_devices() if d["max_input_channels"] > 0]
-        out.append((bool(mics), f"Microphone: {len(mics)} found" if mics else "Microphone: none found - plug one in"))
+        sd = audio_module()
+        mics = list_microphones(sd)
+        wanted = settings.get("mic") or ""
+        label = wanted or "default microphone"
+        if not mics:
+            out.append((False, "Microphone: none found - plug one in"))
+        elif settings.get("_listening"):
+            out.append((True, f"Microphone '{label}': in use - RootsVoice is listening"))
+        else:
+            device = find_device(sd, wanted)
+            if wanted and device is None:
+                out.append((False, f"Microphone '{wanted}' isn't connected - the default is used instead"))
+                label = "default microphone"
+            try:
+                level, info = measure_microphone(sd, device, 1.0)
+                if level > ACTIVE_LEVEL:
+                    out.append((True, f"Microphone '{label}': hearing sound"))
+                else:
+                    out.append((False, f"Microphone '{label}': works, but heard nothing - speak while checking, "
+                                       "or use Settings \u203a Listening \u203a Find active microphone"))
+            except Exception as e:
+                out.append((False, f"Microphone '{label}' can't be opened ({str(e).splitlines()[0][:60]})"))
+    except AudioUnavailable as e:
+        out.append((False, f"Microphone: {e}"))
     except Exception as e:
         out.append((False, f"Microphone system could not start ({e})"))
     name = settings["model"]
     ready = model_ready(name)
     out.append((ready, f"Speech model '{name}': ready" if ready else
                 f"Speech model '{name}': downloads the first time you press Start (needs internet once)"))
-    try:
-        import pygetwindow as gw
-        found = [w for w in gw.getWindowsWithTitle(settings["window_title"]) if w.title.strip()]
-        out.append((bool(found), "VideoPsalm: open and found" if found else
-                    f"VideoPsalm: not open (looking for a window called '{settings['window_title']}')"))
-    except Exception:
-        out.append((False, "VideoPsalm check only works on Windows"))
-    try:
-        import pyautogui  # noqa: F401
-        out.append((True, "Typing into VideoPsalm: ready"))
-    except Exception as e:
-        out.append((False, f"Typing into VideoPsalm is not available ({e})"))
+    name = target_name(settings)
+    if target_profile(settings)["kind"] == "freeshow":
+        ok, msg = freeshow_call(settings, "get_shows", None, "reachable")
+        reachable = ok or "refused" in msg or "error" in msg or "accept" in msg
+        out.append((reachable, f"{name}: API reachable on port {settings.get('api_port') or 5506}" if reachable
+                    else f"{name}: {msg}"))
+        return out
+    win, err = find_target_window(settings)
+    out.append((win is not None, f"{name}: open and found" if win is not None else f"{name}: {err}"))
+    if settings.get("focus") == "click" and settings.get("click_x") is None:
+        out.append((False, f"{name}: show RootsVoice the reference box (Settings › Projection software › "
+                           "Point to it)"))
+    inp, err = input_backend()
+    if err:
+        out.append((False, f"Typing into {name}: {err}"))
+    else:
+        out.append((True, f"Typing into {name}: ready" + (" (built into Windows)" if native_windows() else "")))
     return out
 
 
 # --------------------------------------------------------------------------
-# SYSTEM-WIDE SHORTCUTS - work even while VideoPsalm is the window in front
+# SYSTEM-WIDE SHORTCUTS - work even while the projection software is the window in front
 # --------------------------------------------------------------------------
 _CTRL_ALT = 0x0002 | 0x0001
 HOTKEYS = [   # id, modifiers, Windows key code, action, label
@@ -1285,12 +2394,12 @@ class Engine(threading.Thread):
 
     def run(self):
         try:
-            import sounddevice as sd
-            import faster_whisper  # noqa: F401
-        except ImportError as e:
-            return self._fail(f"Missing package: {e.name}. See the install line at the top of the file.")
-        except OSError as e:   # e.g. the audio library itself can't be loaded
-            return self._fail(f"The microphone system could not start: {e}")
+            sd = audio_module()
+        except AudioUnavailable as e:
+            return self._fail(str(e))
+        ok, msg = check_speech_engine()
+        if not ok:
+            return self._fail(msg)
 
         try:
             model = get_model(self.model_name, lambda m: self.events.put(("progress", m)), self.stop_flag)
@@ -1304,24 +2413,47 @@ class Engine(threading.Thread):
             return
 
         raw = queue.Queue()  # the microphone keeps filling this while a phrase is being transcribed
+        device = find_device(sd, self.mic_name)
+        if self.mic_name and device is None:
+            self.events.put(("warn", f"'{self.mic_name}' isn't connected - using the default microphone."))
         try:
-            stream = sd.InputStream(
-                samplerate=SAMPLE_RATE, channels=1, dtype="float32", blocksize=int(SAMPLE_RATE * 0.1),
-                device=find_device(sd, self.mic_name),
-                callback=lambda indata, frames, t, status: raw.put(indata[:, 0].copy()))
-            stream.start()
+            stream, info = open_microphone(sd, device, raw.put)
         except Exception as e:
             return self._fail(f"Could not open the microphone: {e}")
+        if info["rate"] != SAMPLE_RATE or info["channels"] != 1:
+            self.events.put(("log", f"Microphone opened at {info['rate']} Hz, {info['channels']} channel(s) "
+                                    "- converted automatically"))
 
         ep = Endpointer()
         self.events.put(("status", "Listening"))
         prev_tail, last_heard, last_level = "", time.time(), 0.0
+        last_block = last_sound = time.time()
+        silence_warned = False
         try:
             while not self.stop_flag.is_set():
                 try:
                     block = raw.get(timeout=0.2)
                 except queue.Empty:
+                    if time.time() - last_block > 3:          # unplugged, or the sound system stopped
+                        self.events.put(("warn", "The microphone stopped sending sound - reconnecting\u2026"))
+                        try:
+                            stream.stop()
+                            stream.close()
+                        except Exception:
+                            pass
+                        try:
+                            sd._terminate()                   # refresh the list so a re-plugged mic is found
+                            sd._initialize()
+                        except Exception:
+                            pass
+                        try:
+                            stream, info = open_microphone(sd, find_device(sd, self.mic_name), raw.put)
+                            self.events.put(("log", "Microphone reconnected"))
+                        except Exception:
+                            pass
+                        last_block = time.time()
                     continue
+                last_block = time.time()
                 if raw.qsize() > 300:  # more than 30 s behind: this computer is too slow for the model
                     while not raw.empty():
                         raw.get_nowait()
@@ -1342,6 +2474,12 @@ class Engine(threading.Thread):
                 if time.time() - last_level > 0.25:
                     self.events.put(("level", ep.level))
                     last_level = time.time()
+                if ep.level > 0.004:
+                    last_sound, silence_warned = time.time(), False
+                elif time.time() - last_sound > 20 and not silence_warned:
+                    silence_warned = True
+                    self.events.put(("warn", "No sound from the microphone for 20 seconds - check it isn't muted, "
+                                             "or use Settings \u203a Listening \u203a Find active microphone."))
         except Exception as e:
             self._fail(f"Audio/transcription error: {e}")
         finally:
@@ -3299,20 +4437,13 @@ class TrainingTab:
             self.messagebox.showinfo("RootsVoice", "Stop listening on the Live tab first - the microphone is in use.")
             return False
         try:
-            import sounddevice as sd
-        except ImportError:
-            self.messagebox.showerror("RootsVoice", "The 'sounddevice' package is missing.\nRun: pip install sounddevice numpy")
-            return False
-        except OSError as e:
-            self.messagebox.showerror("RootsVoice", f"The microphone system could not start: {e}")
+            sd = audio_module()
+        except AudioUnavailable as e:
+            self.messagebox.showerror("RootsVoice", str(e))
             return False
         self.frames = []
         try:
-            self.stream = sd.InputStream(
-                samplerate=SAMPLE_RATE, channels=1, dtype="float32",
-                device=find_device(sd, self.get_settings()["mic"]),
-                callback=lambda indata, frames, t, status: self.frames.append(indata.copy()))
-            self.stream.start()
+            self.stream, _info = open_microphone(sd, find_device(sd, self.get_settings()["mic"]), self.frames.append)
         except Exception as e:
             self.messagebox.showerror("RootsVoice", f"Could not open the microphone: {e}")
             return False
@@ -3891,6 +5022,15 @@ def run_gui():
     mode_var = tk.StringVar(value=settings["mode"])
     delay_var = tk.IntVar(value=int(settings["auto_delay"]))
     title_var = tk.StringVar(value=settings["window_title"])
+    current_target = {"id": target_id(settings)}
+    saved_targets = dict(settings.get("targets") or {})
+    target_var = tk.StringVar(value=TARGETS[current_target["id"]]["name"])
+    focus_var = tk.StringVar(value=settings.get("focus") or "hotkey")
+    pointer = {"x": settings.get("click_x"), "y": settings.get("click_y")}
+    api_port_var = tk.StringVar(value=str(settings.get("api_port") or 5506))
+    api_key_var = tk.StringVar(value=settings.get("api_key") or "")
+    click_var = tk.StringVar()
+    target_note = tk.StringVar()
     hotkey_var = tk.StringVar(value=settings["search_hotkey"])
     after_var = tk.StringVar(value=settings["after_keys"])
     sep_var = tk.StringVar(value="space" if settings["separator"] == " " else settings["separator"])
@@ -3966,6 +5106,12 @@ def run_gui():
     ui.label(auto_txt, textvariable=auto_sub, size=9, fg="muted").pack(anchor="w")
     Switch(ui, ab, auto_var, command=lambda: on_auto_toggle()).pack(side="right")
 
+    def live_target_name():
+        try:
+            return target_name(current_settings())
+        except NameError:          # still building the window
+            return target_name(settings)
+
     def draw_auto():
         on = auto_var.get()
         c = ui.c
@@ -3976,7 +5122,8 @@ def run_gui():
         glyph = ui.icon("bolt") or "A"
         auto_icon.create_text(s / 2, s / 2, text=glyph, font=ui.font(12, icon=bool(ui.icon_family)),
                               fill=c["accent"] if on else c["muted"])
-        auto_sub.set("Voice controls VideoPsalm instantly" if on else "Paused · you confirm each verse")
+        auto_sub.set(f"Voice controls {live_target_name()} instantly" if on
+                     else "Paused \u00b7 you confirm each verse")
 
     ui.register(draw_auto)
 
@@ -4119,20 +5266,159 @@ def run_gui():
         box.pack()
         return box
 
-    mic_names = [""]
-    try:
-        import sounddevice as sd
-        seen = set()
-        for d in sd.query_devices():
-            if d["max_input_channels"] > 0 and d["name"] not in seen:
-                seen.add(d["name"])
-                mic_names.append(d["name"])
-    except Exception:
-        pass
+    mic_choice_var = tk.StringVar()
+    mic_labels = {}          # what the dropdown shows -> the name that is saved ("" = Windows default)
+
+    def refresh_mics(event=None):
+        """Fill the dropdown: Windows' default microphone (by name) first, then every microphone."""
+        try:
+            sd = audio_module()
+            names = [n for _, n, _ in list_microphones(sd)]
+            default = default_input_name(sd)
+        except Exception:
+            names, default = [], ""
+        mic_labels.clear()
+        mic_labels[f"Windows default ({default})" if default else "Windows default"] = ""
+        for n in names:
+            mic_labels[n] = n
+        saved = mic_var.get()
+        if saved and saved not in names:
+            mic_labels[f"{saved} (not connected)"] = saved
+        mic_box.configure(values=list(mic_labels))
+        mic_choice_var.set(next(label for label, name in mic_labels.items() if name == saved))
+        mic_hint.set(f"{len(names)} microphone{'s' if len(names) != 1 else ''} found" if names else
+                     "No microphones found - plug one in, then press refresh")
+
+    def on_mic_pick(event=None):
+        mic_var.set(mic_labels.get(mic_choice_var.get(), ""))
+        save_settings(current_settings())
+
+    def set_mic(name):
+        mic_var.set(name)
+        refresh_mics()
 
     c1 = settings_section("Listening", open_=True)
-    ttk.Combobox(setting_row(ui, c1, "Microphone", "Blank = the computer's default"), textvariable=mic_var,
-                 values=mic_names, state="readonly", width=20).pack()
+    mic_hint = tk.StringVar()
+    r = setting_row(ui, c1, "Microphone", None)
+    mic_box = ttk.Combobox(r, textvariable=mic_choice_var, state="readonly", width=24)
+    mic_box.pack(side="left")
+    mic_box.bind("<<ComboboxSelected>>", on_mic_pick)
+    Button(ui, r, icon="refresh", kind="secondary", height=34, command=refresh_mics).pack(side="left", padx=(px(6), 0))
+    ui.label(c1, textvariable=mic_hint, size=9, fg="muted").pack(anchor="w")
+    refresh_mics()
+    Button(ui, c1, text="Find active microphone", icon="mic", kind="secondary", height=38,
+           command=lambda: find_active_mic()).pack(fill="x", pady=(px(2), px(6)))
+
+    def issue_list(parent, issues):
+        """Show each microphone problem with buttons that open the right Windows page."""
+        for issue in issues:
+            box = ui.frame(parent)
+            box.pack(fill="x", pady=(0, px(10)))
+            ui.label(box, text="\u26a0  " + issue["title"], size=10, weight="bold", fg="warn_text", wrap=400).pack(anchor="w")
+            ui.label(box, text=issue["detail"], size=9, fg="muted", wrap=400).pack(anchor="w", pady=(px(2), px(4)))
+            row = ui.frame(box)
+            row.pack(fill="x")
+            for label, target in issue["actions"]:
+                Button(ui, row, text=label, kind="secondary", height=32, size=9,
+                       command=lambda t=target: open_windows_link(t) or messagebox.showinfo(
+                           "RootsVoice", "Open it from the Start menu: " + t)).pack(side="left", padx=(0, px(6)))
+
+    def show_mic_notice(issues, intro="Something is stopping the microphone. Fix the items below, then try again."):
+        win, body = themed_dialog(ui, "Microphone needs attention")
+        ui.label(body, text="Microphone needs attention", size=13, weight="bold", bg="bg").pack(anchor="w")
+        ui.label(body, text=intro, size=9, fg="muted", bg="bg", wrap=420).pack(anchor="w", pady=(0, px(10)))
+        card = Card(ui, body, pad=14).pack(fill="x")
+        issue_list(card.body, issues)
+        row = ui.frame(body, bg="bg")
+        row.pack(fill="x", pady=(px(12), 0))
+        Button(ui, row, text="Close", kind="dark", outer="bg", height=38, command=win.destroy).pack(side="right")
+        return win
+
+    def check_mic_health_later():
+        def worker():
+            events.put(("mic_health", microphone_health()))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def find_active_mic():
+        if state["engine"]:
+            messagebox.showinfo("RootsVoice", "Stop listening first - the microphone is in use.")
+            return
+        win, body = themed_dialog(ui, "Find active microphone")
+        ui.label(body, text="Find active microphone", size=13, weight="bold", bg="bg").pack(anchor="w")
+        ui.label(body, text="Speak, or have the sound desk play something, while RootsVoice listens to each "
+                            "input for a moment.", size=9, fg="muted", bg="bg", wrap=420).pack(anchor="w")
+        prog = tk.StringVar(value="Starting\u2026")
+        ui.label(body, textvariable=prog, size=10, weight="bold", bg="bg", wrap=420).pack(anchor="w", pady=(px(10), 0))
+        list_card = Card(ui, body, pad=12).pack(fill="x", pady=(px(8), 0))
+        results_q = queue.Queue()
+        stop_scan = threading.Event()
+
+        def worker():
+            try:
+                found = scan_microphones(progress=lambda n, total, name: results_q.put(
+                    ("progress", f"Listening to {n} of {total}: {name}")), cancel=stop_scan)
+                issues = [] if best_microphone(found) else microphone_health(mic_count=len(found))
+                results_q.put(("done", (found, issues)))
+            except Exception as e:
+                results_q.put(("error", str(e)))
+
+        def poll():
+            try:
+                while True:
+                    kind, val = results_q.get_nowait()
+                    if kind == "progress":
+                        prog.set(val)
+                    elif kind == "error":
+                        prog.set("Could not test the microphones: " + val)
+                        return
+                    elif kind == "done":
+                        show(*val)
+                        return
+            except queue.Empty:
+                pass
+            if not stop_scan.is_set():
+                root.after(150, poll)
+
+        def show(found, issues=()):
+            best = best_microphone(found)
+            if issues:
+                issue_list(list_card.body, issues)
+            if not found:
+                prog.set("No microphones found - plug one in and try again.")
+            elif best:
+                prog.set(f"Most active: {best['name']}")
+            else:
+                prog.set("None of the inputs heard any sound. Check cables, mute switches and the sound desk, "
+                         "then try again.")
+            for res in found:
+                row = ui.frame(list_card.body)
+                row.pack(fill="x", pady=px(4))
+                LevelMeter(ui, row).pack(side="left").set(min(1.0, res["level"] * 10))
+                txt = ui.frame(row)
+                txt.pack(side="left", fill="x", expand=True, padx=(px(10), px(8)))
+                ui.label(txt, text=res["name"], size=10, weight="bold", wrap=250).pack(anchor="w")
+                ui.label(txt, text=res["note"], size=9, fg="muted", wrap=250).pack(anchor="w")
+                if res["ok"]:
+                    Button(ui, row, text="Use", kind="primary" if res is best else "secondary", height=32, size=9,
+                           command=lambda n=res["name"]: use(n)).pack(side="right")
+
+        def use(name):
+            set_mic(name)
+            save_settings(current_settings())
+            write_log(f"Microphone: {name}")
+            close()
+
+        def close():
+            stop_scan.set()
+            win.destroy()
+
+        row = ui.frame(body, bg="bg")
+        row.pack(fill="x", pady=(px(12), 0))
+        Button(ui, row, text="Test again", icon="refresh", kind="secondary", outer="bg", height=38,
+               command=lambda: (close(), find_active_mic())).pack(side="left")
+        Button(ui, row, text="Close", kind="dark", outer="bg", height=38, command=close).pack(side="right")
+        threading.Thread(target=worker, daemon=True).start()
+        poll()
     r = setting_row(ui, c1, "Accuracy", "Bigger hears better but needs a faster computer")
     model_box = ttk.Combobox(r, textvariable=model_var, state="readonly", values=list(MODEL_MB), width=10)
     model_box.pack(side="left")
@@ -4141,8 +5427,9 @@ def run_gui():
     ui.label(c1, textvariable=model_hint, size=9, fg="muted", wrap=430).pack(anchor="w")
 
     c2 = settings_section("Moving through scripture",
-                          "VideoPsalm has no keys for next or previous verse, so RootsVoice works out the new "
-                          "reference and types it for you. Choose how you want to step:")
+                          "Most projection programs have no voice-friendly next / previous verse keys, so "
+                          "RootsVoice works out the new reference and sends it for you. Choose how you want "
+                          "to step:")
     Switch(ui, setting_row(ui, c2, "Keyboard shortcuts", "Ctrl+Alt+→ / ← for next / previous verse, "
                                                          "from any window. Full list in Help."),
            keys_var, command=lambda: (restart_hotkeys(), save_settings(current_settings()))).pack()
@@ -4153,17 +5440,148 @@ def run_gui():
                                                               "\u201cRoots, next verse\u201d. Safer in a sermon."),
            wake_var).pack()
 
-    c3 = settings_section("VideoPsalm")
-    field(setting_row(ui, c3, "Window title", "Text in VideoPsalm's title bar"), title_var)
-    field(setting_row(ui, c3, "Search shortcut", "e.g. ctrl+f"), hotkey_var)
-    field(setting_row(ui, c3, "Keys after typing", "enter, or enter,enter to go live"), after_var)
-    ttk.Combobox(setting_row(ui, c3, "Verse separator", "John 3:16, 3.16 or 3 16"), textvariable=sep_var,
+    c3 = settings_section("Projection software")
+    r = setting_row(ui, c3, "Program", "Which program shows the verses")
+    target_box = ttk.Combobox(r, textvariable=target_var, values=[t["name"] for t in TARGETS.values()],
+                              state="readonly", width=14)
+    target_box.pack(side="left")
+    target_box.bind("<<ComboboxSelected>>", lambda e: switch_target_by_name(target_var.get()))
+    Button(ui, r, text="Detect", icon="search", kind="secondary", height=34, size=9,
+           command=lambda: detect_program()).pack(side="left", padx=(px(6), 0))
+    ui.label(c3, textvariable=target_note, size=9, fg="muted", wrap=430).pack(anchor="w", pady=(0, px(4)))
+    mode_holder = ui.frame(c3)
+    mode_holder.pack(fill="x")
+    keys_box, api_box = ui.frame(mode_holder), ui.frame(mode_holder)
+    field(setting_row(ui, keys_box, "Window title", "Part of the program's title bar text"), title_var)
+    r = setting_row(ui, keys_box, "Reach the reference box by", "Its shortcut key, or a spot you point to once")
+    fseg = Card(ui, r, fill="seg", border=None, outer="surface", radius=9, pad=3).pack()
+    focus_btns = {}
+    for m, label in (("hotkey", "Shortcut"), ("click", "Pointing")):
+        focus_btns[m] = Button(ui, fseg.body, text=label, kind="seg_off", outer="seg", height=30, radius=7,
+                               size=9, command=lambda m=m: set_focus(m)).pack(side="left")
+    focus_holder = ui.frame(keys_box)
+    focus_holder.pack(fill="x")
+    hotkey_row, click_row = ui.frame(focus_holder), ui.frame(focus_holder)
+    field(setting_row(ui, hotkey_row, "Search shortcut", "e.g. ctrl+f"), hotkey_var)
+    Button(ui, setting_row(ui, click_row, "Reference box", "Hold the mouse over it for 5 seconds"),
+           text="Point to it", icon="edit", kind="secondary", height=34, size=9,
+           command=lambda: point_to_box()).pack()
+    ui.label(click_row, textvariable=click_var, size=9, fg="muted", wrap=430).pack(anchor="w")
+    field(setting_row(ui, keys_box, "Keys after typing", "enter, or enter,enter to go live"), after_var)
+    ttk.Combobox(setting_row(ui, keys_box, "Verse separator", "John 3:16, 3.16 or 3 16"), textvariable=sep_var,
                  values=[":", ".", "space"], state="readonly", width=7).pack()
-    ui.label(c3, text="Only if your VideoPsalm has its own keys - leave blank and RootsVoice types the verse:",
+    ui.label(keys_box, text="Only if the program has its own keys - leave blank and RootsVoice types the verse:",
              size=9, fg="muted", wrap=430).pack(anchor="w", pady=(px(8), 0))
-    key_dropdown(setting_row(ui, c3, "Next verse key"), next_key_var)
-    key_dropdown(setting_row(ui, c3, "Previous verse key"), prev_key_var)
-    key_dropdown(setting_row(ui, c3, "Clear screen key", "Blank = Clear is off"), clear_key_var)
+    key_dropdown(setting_row(ui, keys_box, "Next verse key"), next_key_var)
+    key_dropdown(setting_row(ui, keys_box, "Previous verse key"), prev_key_var)
+    key_dropdown(setting_row(ui, keys_box, "Clear screen key", "Blank = Clear is off"), clear_key_var)
+    field(setting_row(ui, api_box, "API port", "FreeShow › Settings › Connections"), api_port_var, 90)
+    field(setting_row(ui, api_box, "API key", "Only if you set one in FreeShow"), api_key_var)
+    Button(ui, c3, text="Send a test verse (John 3:16)", icon="send", kind="secondary", height=38,
+           command=lambda: test_send()).pack(fill="x", pady=(px(10), 0))
+
+    def profile_values():
+        vals = {"window_title": title_var.get().strip(), "focus": focus_var.get(),
+                "search_hotkey": hotkey_var.get().strip(), "after_keys": after_var.get().strip(),
+                "next_key": next_key_var.get().strip(), "prev_key": prev_key_var.get().strip(),
+                "clear_key": clear_key_var.get().strip(), "click_x": pointer["x"], "click_y": pointer["y"],
+                "api_key": api_key_var.get().strip()}
+        try:
+            vals["api_port"] = int(api_port_var.get() or 5506)
+        except ValueError:
+            vals["api_port"] = 5506
+        return vals
+
+    def load_profile(tid):
+        vals = target_values(tid, saved_targets.get(tid))
+        title_var.set(vals["window_title"])
+        focus_var.set(vals["focus"])
+        hotkey_var.set(vals["search_hotkey"])
+        after_var.set(vals["after_keys"])
+        next_key_var.set(vals["next_key"])
+        prev_key_var.set(vals["prev_key"])
+        clear_key_var.set(vals["clear_key"])
+        pointer["x"], pointer["y"] = vals["click_x"], vals["click_y"]
+        api_port_var.set(str(vals["api_port"]))
+        api_key_var.set(vals["api_key"])
+
+    def apply_target_ui():
+        t = TARGETS[current_target["id"]]
+        target_var.set(t["name"])
+        target_note.set(t["note"])
+        keys_box.pack_forget()
+        api_box.pack_forget()
+        (api_box if t["kind"] == "freeshow" else keys_box).pack(fill="x")
+        set_focus(focus_var.get())
+        if pointer["x"] is None:
+            click_var.set("Not set yet.")
+        else:
+            click_var.set(f"\u2713 Saved: {pointer['x']}, {pointer['y']} from the window's top-left corner.")
+        draw_auto()
+
+    def set_focus(m):
+        focus_var.set(m)
+        for k, b in focus_btns.items():
+            b.configure(kind="seg_on" if k == m else "seg_off")
+        hotkey_row.pack_forget()
+        click_row.pack_forget()
+        (click_row if m == "click" else hotkey_row).pack(fill="x")
+
+    def switch_target(tid):
+        if tid == current_target["id"]:
+            apply_target_ui()
+            return
+        saved_targets[current_target["id"]] = profile_values()
+        current_target["id"] = tid
+        load_profile(tid)
+        apply_target_ui()
+        save_settings(current_settings())
+        write_log(f"Projection software: {TARGETS[tid]['name']}")
+
+    def switch_target_by_name(name):
+        tid = next((k for k, t in TARGETS.items() if t["name"] == name), "custom")
+        switch_target(tid)
+
+    def detect_program():
+        found = detect_open_programs()
+        if not found:
+            messagebox.showinfo("RootsVoice", "None of the supported programs is open right now.\n\n"
+                                "Open your projection software and press Detect again, or choose it from the list.")
+            return
+        switch_target(found[0])
+        others = ", ".join(TARGETS[t]["name"] for t in found[1:])
+        messagebox.showinfo("RootsVoice", f"Found {TARGETS[found[0]]['name']} - RootsVoice will use it."
+                            + (f"\n\nAlso open: {others}" if others else ""))
+
+    def point_to_box():
+        s = current_settings()
+        win, err = find_target_window(s)
+        if err:
+            click_var.set(err)
+            return
+        try:
+            win.activate()
+        except Exception:
+            pass
+        countdown(5)
+
+    def countdown(n):
+        if n > 0:
+            click_var.set(f"Hold the mouse over {target_name(current_settings())}'s reference box\u2026 {n}")
+            root.after(1000, countdown, n - 1)
+            return
+        pos, err = pointer_offset(current_settings())
+        if err:
+            click_var.set(err)
+            return
+        pointer["x"], pointer["y"] = pos
+        click_var.set(f"\u2713 Saved: {pos[0]}, {pos[1]} from the window's top-left corner.")
+        save_settings(current_settings())
+        write_log(f"Reference box set for {target_name(current_settings())}")
+
+    def test_send():
+        clear_pending("Sending a test verse...")
+        do_send("John" + (" 3" + (current_settings()["separator"]) + "16"))
 
     c4 = settings_section("When RootsAuto is off")
     r = setting_row(ui, c4, "Sending", "Confirm each verse, or send after a countdown")
@@ -4191,7 +5609,7 @@ def run_gui():
                             state="readonly", width=9)
     size_box.pack()
     size_box.bind("<<ComboboxSelected>>", lambda e: on_size_change())
-    Switch(ui, setting_row(ui, c5, "Keep on top", "Stay above VideoPsalm"), top_var,
+    Switch(ui, setting_row(ui, c5, "Keep on top", "Stay above your projection software"), top_var,
            command=lambda: root.attributes("-topmost", top_var.get())).pack()
     Switch(ui, setting_row(ui, c5, "Live learning panel", "Fix mishearings from the Live screen"), learn_var,
            command=lambda: toggle_learn_panel()).pack()
@@ -4220,20 +5638,103 @@ def run_gui():
 
     section_title(ui, hp, "HELP").pack(anchor="w", pady=(0, px(6)))
     b = help_section("Quick start", open_=True)
-    rows(b, [("1", "Open VideoPsalm."),
+    rows(b, [("1", "Open your projection software, and pick it in Settings › Projection software "
+                   "(or press Detect)."),
              ("2", "Press Start listening. The first time, the speech model downloads once (needs internet)."),
              ("3", "Speak a reference: “Turn to John chapter 3 verse 16”."),
-             ("4", "RootsAuto on: it appears in VideoPsalm straight away. RootsAuto off: press Send.")])
+             ("4", "RootsAuto on: it appears on screen straight away. RootsAuto off: press Send.")])
 
     def run_setup_check():
-        lines = setup_check(current_settings())
-        good = all(ok for ok, _ in lines)
-        messagebox.showinfo("Check setup", ("Everything is ready.\n\n" if good else
-                                            "Almost there - see the items marked \u2715.\n\n")
-                            + "\n".join(("\u2713  " if ok else "\u2715  ") + msg for ok, msg in lines))
+        set_status("Checking setup\u2026", "busy")
+        s = dict(current_settings(), _listening=bool(state["engine"]))
+
+        def worker():
+            lines = setup_check(s)
+            events.put(("setup_result", lines, microphone_health()))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     Button(ui, b, text="Check setup", icon="check", kind="primary", height=40, weight="bold",
            command=run_setup_check).pack(fill="x", pady=(px(8), 0))
+    Button(ui, b, text="Install missing components", icon="download", kind="secondary", height=38,
+           command=lambda: show_components_dialog()).pack(fill="x", pady=(px(6), 0))
+
+    def show_components_dialog(missing=None):
+        """Lists what is missing and installs it with one click, showing pip's progress."""
+        missing = missing_dependencies() if missing is None else missing
+        win, body = themed_dialog(ui, "Install components")
+        required = [m for m in missing if m[2]]
+        title = ("RootsVoice needs a few things" if required else
+                 "Optional components" if missing else "Everything RootsVoice needs is installed")
+        ui.label(body, text=title, size=13, weight="bold", bg="bg").pack(anchor="w")
+        if FROZEN and missing:
+            ui.label(body, text="Part of RootsVoice is missing. Please reinstall it with the latest Setup file.",
+                     size=10, bg="bg", wrap=420).pack(anchor="w", pady=(px(6), 0))
+        card = Card(ui, body, pad=12).pack(fill="x", pady=(px(8), 0))
+        for pip, why, req in missing:
+            ui.label(card.body, text=f"\u2022 {pip}" + ("" if req else "  (optional)"), size=10,
+                     weight="bold").pack(anchor="w")
+            ui.label(card.body, text=why, size=9, fg="muted", wrap=400).pack(anchor="w", pady=(0, px(4)))
+        if not missing:
+            ui.label(card.body, text="\u2713 Speech engine, sound and typing components are ready.", size=10,
+                     fg="accent_soft_text").pack(anchor="w")
+        note = python_version_note()
+        status = tk.StringVar(value=(note + "\n\n" if note else "") + (
+            "Needs internet once and takes a few minutes (about 150-300 MB)." if missing and not FROZEN else ""))
+        ui.label(body, textvariable=status, size=9, fg="muted", bg="bg", wrap=420).pack(anchor="w", pady=(px(8), 0))
+        log_card = Card(ui, body, pad=6)
+        log_box = ui.text(log_card.body, height=8)
+        log_box.pack(fill="both", expand=True)
+        row = ui.frame(body, bg="bg")
+        row.pack(fill="x", pady=(px(12), 0))
+        q = queue.Queue()
+        close_btn = Button(ui, row, text="Not now" if missing else "Close", kind="ghost", outer="bg", height=40,
+                           command=win.destroy)
+        close_btn.pack(side="right")
+        install_btn = Button(ui, row, text="Install now", icon="download", kind="primary", outer="bg", height=40,
+                             weight="bold", command=lambda: start())
+        restart_btn = Button(ui, row, text="Restart RootsVoice", icon="refresh", kind="primary", outer="bg",
+                             height=40, weight="bold", command=lambda: on_close(restart=True))
+        if missing and not FROZEN:
+            install_btn.pack(side="right", padx=(0, px(8)))
+
+        def start():
+            install_btn.configure(state="disabled")
+            close_btn.configure(state="disabled")
+            status.set("Installing\u2026 please keep RootsVoice open.")
+            log_card.pack(fill="both", expand=True, pady=(px(8), 0), before=row)
+            pkgs = [pip for pip, _, _ in missing]
+
+            def worker():
+                ok, msg = install_packages(pkgs, log=lambda line: q.put(("line", line)))
+                q.put(("done", ok, msg))
+
+            threading.Thread(target=worker, daemon=True).start()
+            poll()
+
+        def poll():
+            try:
+                while True:
+                    item = q.get_nowait()
+                    if item[0] == "line":
+                        log_box.insert("end", item[1] + "\n")
+                        log_box.see("end")
+                    else:
+                        _, ok, msg = item
+                        status.set(msg)
+                        write_log(msg)
+                        close_btn.configure(state="normal", text="Close")
+                        if ok:
+                            install_btn.pack_forget()
+                            restart_btn.pack(side="right", padx=(0, px(8)))
+                        else:
+                            install_btn.configure(state="normal", text="Try again")
+                        return
+            except queue.Empty:
+                pass
+            root.after(150, poll)
+
+        return win
     rows(help_section("Voice commands"), [
         ("“John chapter 3 verse 16”", "Show that verse"),
         ("“Psalm 23”", "Show the chapter (no verse spoken)"),
@@ -4242,13 +5743,42 @@ def run_gui():
         ("“Next verse”  or  “Roots next”", "One verse forward"),
         ("“Previous verse”  or  “Roots back”", "One verse back"),
         ("“Next chapter” / “Previous chapter”", "Change chapter"),
-        ("“Clear the screen”", "Blank VideoPsalm (needs a Clear key in Settings)")])
+        ("“Clear the screen”", "Blank the screen (needs a Clear key in Settings, except FreeShow)")])
+    b = help_section("Projection software")
+    para(b, "Choose your program in Settings › Projection software, or press Detect while it is open. "
+            "Then press Send a test verse.")
+    rows(b, [("VideoPsalm", "Ready to go - RootsVoice uses its Ctrl+F search."),
+             ("BibleShow", "Ready to go - RootsVoice presses F5 (BibleShow's reference shortcut), types the "
+                           "reference and presses Enter."),
+             ("EasyWorship, ProPresenter, OpenLP",
+              "Open the program's Bible / scripture panel, press Point to it and hold the mouse over the box "
+              "where you type a reference. RootsVoice clicks there each time."),
+             ("FreeShow", "Turn on FreeShow's API (Settings › Connections). Nothing is typed, so FreeShow can "
+                          "stay in the background."),
+             ("Any other program", "Choose Other program, type part of its window title, then point to its "
+                                   "reference box (or enter its search shortcut).")])
+    para(b, "If the program's window moves, pointing still works. If its layout changes (another panel opened, "
+            "a new version), press Point to it again.", fg="muted")
+    b = help_section("Microphones")
+    rows(b, [("Find active microphone", "Settings › Listening. Speak while it listens to every input, then "
+                                        "press Use on the one that heard you."),
+             ("Any microphone works", "Inputs that refuse RootsVoice's format (common with USB interfaces) are "
+                                      "opened in a format they accept and converted automatically."),
+             ("Unplugged?", "RootsVoice reconnects by itself when the microphone comes back."),
+             ("Silent?", "After 20 seconds without sound, RootsVoice warns you to check mute switches."),
+             ("Driver missing?", "RootsVoice asks Windows which sound devices have driver problems and offers "
+                                 "Look for driver updates and Device Manager. Check setup shows them too."),
+             ("Blocked by Windows?", "If Windows privacy settings block the microphone, RootsVoice says so and "
+                                     "opens the right settings page."),
+             ("No sounddevice library?", "RootsVoice records with Windows' own sound system instead - nothing to "
+                                         "install."),
+             ("Best sound", "A feed from the sound desk beats a room microphone.")])
     b = help_section("Moving through scripture in RootsAuto")
-    para(b, "VideoPsalm has no keys for next or previous verse, so RootsVoice keeps track of where you are, "
-            "works out the new reference and types it into VideoPsalm's search. Use whichever suits you:")
+    para(b, "Most projection programs have no voice-friendly next / previous verse keys, so RootsVoice keeps "
+            "track of where you are, works out the new reference and sends it. Use whichever suits you:")
     rows(b, [("Say it", "“Roots next”, “Roots back”, “Roots 18”"),
              ("Click", "The ‹ › arrows and verse numbers under the current verse"),
-             ("Keyboard", "Ctrl+Alt+→ / ← from any window - VideoPsalm can stay in front"),
+             ("Keyboard", "Ctrl+Alt+→ / ← from any window - your projection software can stay in front"),
              ("Clicker", "Turn on Presentation clicker in Settings: its forward / back buttons step verses"),
              ("Undo", "Back, or Ctrl+Alt+B, returns to the previous reference")])
     b = help_section("Keyboard shortcuts")
@@ -4259,9 +5789,10 @@ def run_gui():
     para(b, "If Ctrl+Alt+arrows turn the screen sideways, your graphics driver uses them: switch off its "
             "hotkeys in the graphics settings, or switch these shortcuts off.", fg="muted")
     b = help_section("RootsAuto")
-    para(b, "With RootsAuto on, references and commands go to VideoPsalm the moment the speaker pauses - no "
-            "clicking. Ordinary preaching is ignored, and impossible references such as “John 35” are "
-            "never shown. Turn it off (switch, or Ctrl+Alt+A) to check each verse before it goes on screen.")
+    para(b, "With RootsAuto on, references and commands go on screen the moment the speaker pauses - no "
+            "clicking. Ordinary preaching is ignored, impossible references such as “John 35” are "
+            "never shown, and if a book name is misheard nothing is shown - pick from “Did you mean” "
+            "instead. Turn it off (switch, or Ctrl+Alt+A) to check each verse before it goes on screen.")
     b = help_section("Training tips")
     rows(b, [("Listen & correct", "The quickest win. Say a reference, fix any wrong words, Save correction."),
              ("Practice prompts", "Read about 15 aloud, then Finish session. You can stop early."),
@@ -4269,10 +5800,19 @@ def run_gui():
                               "new ones from your corrections."),
              ("Re-learn", "After choosing a bigger Accuracy model, press Re-learn everything.")])
     rows(help_section("Troubleshooting"), [
+        ("\u201cMissing package\u201d / faster-whisper", "Help \u203a Install missing components, or double-click "
+                                                       "setup_rootsvoice.bat in the RootsVoice folder."),
         ("Stuck on Downloading", "First use needs internet. Press Download in Settings on a good connection; "
                                  "it resumes if interrupted."),
-        ("VideoPsalm not found", "Open VideoPsalm, or check Window title in Settings › VideoPsalm."),
-        ("Mic bar doesn't move", "Pick the right Microphone in Settings. A feed from the sound desk works best."),
+        ("Program not found", "Open your projection software, or check Settings › Projection software "
+                              "(press Detect)."),
+        ("Verse typed in the wrong place", "Open the program's Bible panel, then Point to it again."),
+        ("Program comes to the front but nothing is typed", "It is probably running as administrator. Windows "
+                                                            "then blocks other programs - run RootsVoice as "
+                                                            "administrator too."),
+        ("Mic bar doesn't move", "Settings › Listening › Find active microphone."),
+        ("“Didn't catch the book name”", "Pick from Did you mean, or teach it in Training › "
+                                                 "Listen & correct."),
         ("Wrong verse shown", "Press Back (Ctrl+Alt+B), then teach it in Training › Listen & correct."),
         ("Falling behind", "Choose a smaller Accuracy model in Settings."),
         ("Too big or small", "Settings › Display › Size.")])
@@ -4286,8 +5826,9 @@ def run_gui():
     name.pack(side="left", padx=(px(12), 0))
     ui.label(name, text="RootsVoice", size=15, weight="bold", display=True).pack(anchor="w")
     ui.label(name, text=f"Version {APP_VERSION}  ·  by {APP_PUBLISHER}", size=9, fg="muted").pack(anchor="w")
-    para(about.body, "Voice-controlled scripture for VideoPsalm. Speak a Bible reference and it appears on "
-                     "screen; step through verses by voice, keyboard or clicker.")
+    para(about.body, "Voice-controlled scripture for VideoPsalm, BibleShow, EasyWorship, ProPresenter, OpenLP "
+                     "and FreeShow. Speak a Bible reference and it appears on screen; step through verses by "
+                     "voice, keyboard or clicker.")
     para(about.body, "Private by design: speech is turned into text on this computer and is never sent over "
                      "the internet. The only download is the speech model, once.", fg="muted")
     folder_row = ui.frame(about.body)
@@ -4331,6 +5872,13 @@ def run_gui():
             "size": size_var.get().lower(),
             "global_keys": bool(keys_var.get()),
             "clicker": bool(clicker_var.get()),
+            "target": current_target["id"],
+            "focus": focus_var.get(),
+            "click_x": pointer["x"],
+            "click_y": pointer["y"],
+            "api_port": profile_values()["api_port"],
+            "api_key": api_key_var.get().strip(),
+            "targets": {**saved_targets, current_target["id"]: profile_values()},
         }
 
     def apply_theme(name):
@@ -4551,14 +6099,16 @@ def run_gui():
         skip_btn.configure(state="disabled")
 
     def do_send(ref, keys=""):
-        """Show `ref` in VideoPsalm: press `keys` if given (next/previous key), else type it."""
+        """Show `ref` in the projection software: press `keys` if given (next/previous key), else type it."""
         s = current_settings()
+        if target_profile(s)["kind"] == "freeshow":
+            keys = ""            # FreeShow always gets the full reference
 
         def worker():
             if keys:
-                ok, msg = press_in_videopsalm(keys, s, f"Sent {ref} (key '{keys}')")
+                ok, msg = press_in_target(keys, s, f"Sent {ref} (key '{keys}')")
             else:
-                ok, msg = send_to_videopsalm(ref, s)
+                ok, msg = send_reference(ref, s)
             events.put(("sent", ref, msg) if ok else ("error", msg))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -4573,8 +6123,9 @@ def run_gui():
         do_send(ref, keys)
 
     def do_clear(by_voice=False):
-        keys = current_settings()["clear_key"]
-        if not keys:
+        s = current_settings()
+        keys = s["clear_key"]
+        if not keys and target_profile(s)["kind"] != "freeshow":
             msg = "Set a 'Clear screen key' in Settings to use Clear."
             hint_var.set(msg)
             if not by_voice:
@@ -4582,7 +6133,7 @@ def run_gui():
             return
 
         def worker():
-            ok, msg = press_in_videopsalm(keys, current_settings(), "Screen cleared")
+            ok, msg = press_in_target(keys, current_settings(), "Screen cleared", api_action="clear_all")
             events.put(("cleared", msg) if ok else ("error", msg))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -4620,7 +6171,7 @@ def run_gui():
         if s["mode"] == "auto":
             tick(s["auto_delay"])
         else:
-            hint_var.set("Heard just now – press Send to show it in VideoPsalm")
+            hint_var.set(f"Heard just now \u2013 press Send to show it in {target_name(current_settings())}")
 
     def send_manual(event=None):
         text = manual_var.get().strip()
@@ -4759,6 +6310,22 @@ def run_gui():
                 elif kind == "warn":
                     write_log("WARNING: " + ev[1])
                     hint_var.set(ev[1])
+                elif kind == "log":
+                    write_log(ev[1])
+                elif kind == "setup_result":
+                    lines, issues = ev[1], ev[2]
+                    lines = lines + [(False, i["title"]) for i in issues
+                                     if not any(i["title"] in m for _, m in lines)]
+                    good = all(ok for ok, _ in lines)
+                    set_status("Listening" if state["engine"] else "Stopped", "live" if state["engine"] else "idle")
+                    messagebox.showinfo("Check setup", ("Everything is ready.\n\n" if good else
+                                                        "Almost there - see the items marked \u2715.\n\n")
+                                        + "\n".join(("\u2713  " if ok else "\u2715  ") + msg for ok, msg in lines))
+                    if issues:
+                        show_mic_notice(issues)
+                elif kind == "mic_health":
+                    if ev[1]:
+                        show_mic_notice(ev[1])
                 elif kind == "text":
                     s = current_settings()
                     combined, fresh = ev[1], ev[2]
@@ -4795,11 +6362,15 @@ def run_gui():
                         else:
                             set_pending(ref)
                         show_suggestions(build_suggestions(tracker))
-                    elif related:
-                        near = scan_near_misses(combined)
+                    elif related or tracker.unclear:
+                        near = scan_near_misses(combined, guesses=3)
                         if near:
-                            hint_var.set("Not sure what was said – see the suggestions.")
+                            hint_var.set("Didn't catch the book name \u2013 is it one of these?")
                             show_suggestions(build_suggestions(tracker, near, predict=False))
+                        elif tracker.unclear:
+                            hint_var.set("Didn't catch the book name \u2013 say it again, or type it below.")
+                        if tracker.unclear:
+                            write_log("Book name not recognised - nothing sent")
                 elif kind == "cleared":
                     write_log(ev[1])
                     hint_var.set("Screen cleared.")
@@ -4827,8 +6398,12 @@ def run_gui():
                                      + f" at {time.strftime('%H:%M')}")
                 elif kind == "error":
                     write_log("ERROR: " + ev[1])
-                    set_status("Error – see Activity", "error")
+                    set_status("Error \u2013 see Activity", "error")
                     hint_var.set(ev[1][:160])
+                    if "missing package" in ev[1].lower() and not FROZEN:
+                        show_components_dialog()       # offer to install it right here
+                    elif "microphone" in ev[1].lower() or "sounddevice" in ev[1].lower():
+                        check_mic_health_later()      # driver missing? privacy? no mic? - say how to fix it
                     eng = state["engine"]
                     if eng is not None and eng.failed:
                         state["engine"] = None
@@ -4849,6 +6424,9 @@ def run_gui():
 
     root.protocol("WM_DELETE_WINDOW", lambda: on_close())
     show_page("live")
+    if needs_install():
+        root.after(500, show_components_dialog)      # e.g. faster-whisper missing: offer to install it now
+    apply_target_ui()
     restart_hotkeys()
     toggle_learn_panel()
     render_history()
@@ -4856,7 +6434,7 @@ def run_gui():
     show_suggestions([])
     set_status("Stopped", "idle")
     pump()
-    write_log("Ready. Open VideoPsalm, then press Start listening.")
+    write_log(f"Ready. Open {target_name(current_settings())}, then press Start listening.")
     root.mainloop()
 
 
@@ -4867,6 +6445,22 @@ if __name__ == "__main__":
             print(f"{phrase.strip()!r:55} -> {t.parse(phrase)}")
     elif "--scan" in sys.argv:
         print(scan_near_misses(sys.argv[sys.argv.index("--scan") + 1]))
+    elif "--check-deps" in sys.argv:              # used by setup_rootsvoice.bat
+        lines = component_lines()
+        for ok, msg in lines:
+            print(("  OK   " if ok else "  FIX  ") + msg)
+        note = python_version_note()
+        if note:
+            print("  NOTE " + note)
+        sys.exit(0 if all(ok for ok, _ in lines) else 1)
+    elif "--make-shortcut" in sys.argv:           # used by setup_rootsvoice.bat
+        ok, msg = make_desktop_shortcut()
+        print(msg)
+        sys.exit(0 if ok else 1)
+    elif "--install" in sys.argv:                 # install whatever is missing
+        ok, msg = install_packages([p for p, _, _ in missing_dependencies()], log=print)
+        print(msg)
+        sys.exit(0 if ok else 1)
     elif "--download-model" in sys.argv:          # used by build_installer.bat
         i = sys.argv.index("--download-model")
         name = sys.argv[i + 1] if len(sys.argv) > i + 1 else "base.en"

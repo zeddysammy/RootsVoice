@@ -2,6 +2,53 @@
 
 All notable changes to RootsVoice. The newest version is at the top.
 
+## [2.2.3] - 2026-11-11
+
+### Fixed
+- **"Missing faster-whisper".** RootsVoice now checks its components at startup. If the speech engine (or anything else) is missing, it offers **Install now**, installs it into the Python it is running with (showing progress), and restarts. Also under Help → *Install missing components*.
+- Install problems are explained in plain words: no internet, a Python version the speech engine isn't built for, missing package installer, permissions (retried for the current user), full disk, and Microsoft's Visual C++ runtime (with its download link).
+
+### Added
+- **`setup_rootsvoice.bat`**: one double-click installs Python 3.11 (if needed), RootsVoice's own environment, every component, the Visual C++ runtime if the speech engine needs it, the speech model, and a desktop shortcut - then starts RootsVoice. **`RootsVoice.bat`** starts it afterwards.
+- `--check-deps`, `--install` and `--make-shortcut` commands; Check setup lists the components.
+
+## [2.2.2] - 2026-11-11
+
+### Fixed
+- **"Couldn't find the sounddevice module".** When the sounddevice library isn't installed (or won't load), RootsVoice now records with Windows' own sound system (winmm), so listening, training and Find active microphone all work without it.
+
+### Added
+- **Microphone list shows Windows' default by name** - "Windows default (Microphone Array ...)" first, then every microphone. A saved microphone that is unplugged is marked "(not connected)", and a refresh button picks up newly plugged ones.
+- **Driver notices:** RootsVoice asks Windows which sound devices have driver problems (no driver, damaged, disabled...) and shows "Microphone needs attention" with buttons to *Look for driver updates* (Windows Update → Optional updates), *Open Device Manager* or *Open Sound settings*. It also spots Windows privacy settings blocking the microphone. Shown when the microphone fails to open, when Find active microphone hears nothing, and in Check setup.
+- Check setup runs in the background, so the window no longer freezes while it checks.
+
+## [2.2.1] - 2026-11-11
+
+### Fixed
+- **"Missing package: pyautogui" with BibleShow.** On Windows, RootsVoice now types, presses keys, clicks and finds windows with Windows' own functions, so pyautogui and pygetwindow are no longer needed there (they remain a fallback elsewhere). If a library is ever missing, the message says exactly how to fix it.
+- Typing uses real characters, so references come out right with any keyboard layout (":" used to depend on the layout).
+- Bringing the projection program to the front works even when Windows normally refuses it.
+- **BibleShow uses F5** to open its reference box - no pointing needed. Settings saved by 2.2 are switched to F5 automatically (unless you had pointed to a box).
+
+### Added
+- Troubleshooting tip: a program running as administrator can't be typed into unless RootsVoice runs as administrator too.
+
+## [2.2] - 2026-11-11
+
+### Added
+- **More projection software:** BibleShow, EasyWorship, ProPresenter, OpenLP, FreeShow and "Other program", alongside VideoPsalm. Settings → *Projection software* has a program list, **Detect** (finds the open one), and **Send a test verse**. Each program's settings are remembered separately.
+- **Point to it:** for programs without a search shortcut, hold the mouse over the reference box once; RootsVoice clicks there (measured from the window corner, so moving the window is fine).
+- **FreeShow** is controlled through its own API (`start_scripture`, `clear_all`) - nothing is typed.
+- **Find active microphone** (Settings → Listening): listens to every input, shows which one hears sound and picks the most active; "Stereo Mix"-style loopback is never chosen.
+- Help sections for *Projection software* and *Microphones*.
+
+### Fixed
+- **A misheard book no longer shows the previous book (often Psalm).** "Turn to *Habakook* chapter 2 verse 4" used to put Psalm 2:4 on screen after a Psalm; now nothing is sent and *Did you mean Habakkuk 2:4?* is offered. Picking it teaches the spelling.
+- Better *Did you mean* guesses, by spelling and by sound (e.g. "Zefanaya" → Zephaniah, "Thesalonians" → 1 or 2 Thessalonians), and only for chapters that exist.
+- **Microphone compatibility:** inputs that refuse 16 kHz or a single channel (many USB interfaces) are opened in a format they accept and converted.
+- A saved microphone that is unplugged falls back to the default with a warning; if sound stops while listening, RootsVoice reconnects by itself; 20 seconds of silence brings a "check it isn't muted" warning.
+- *Check setup* now really listens to the chosen microphone and checks the chosen projection software.
+
 ## [2.1] - 2026-11-06
 
 ### Added
