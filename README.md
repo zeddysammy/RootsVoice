@@ -1,19 +1,35 @@
 <p align="center">
   <img src="roots-icon-128.png" width="96" alt="RootsVoice logo">
 </p>
-
 <h1 align="center">RootsVoice</h1>
-
 <p align="center">
   <b>Voice-controlled scripture for VideoPsalm, BibleShow, EasyWorship, ProPresenter, OpenLP and FreeShow.</b><br>
   Speak a Bible reference - it appears on screen.
 </p>
-
 <p align="center">
   <a href="../../releases/latest"><img src="https://img.shields.io/badge/download-Windows%20installer-1E7A46" alt="Download"></a>
   <img src="https://img.shields.io/badge/version-2.2.3-1E7A46" alt="Version 2.2.3">
   <img src="https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-555" alt="Windows 10 | 11">
 </p>
+<p align="center">
+  <a href="docs/media/RootsVoice-Intro.mp4" title="Watch the RootsVoice intro video">
+    <img src="docs/media/intro-poster.jpg" width="720" alt="RootsVoice intro video - click to watch">
+  </a>
+  <br>
+  <sub><a href="1112.mp4">▶ Watch the 80-second intro</a> - what RootsVoice does, how it works, and why it helps.</sub>
+</p>
+<!--
+  To make the video play right here on the page (instead of opening on click):
+  1. On github.com, open README.md and click the pencil (Edit).
+  2. Drag docs/media/RootsVoice-Intro.mp4 from your computer into the editor.
+  3. GitHub uploads it and inserts a link like https://github.com/user-attachments/assets/xxxx
+  4. Put that link on its own line where this comment is, then Commit changes.
+  A link on its own line becomes a video player on the README.
+
+<p align="center">
+  <img src="docs/media/how-it-works.gif" width="640" alt="RootsVoice hears a reference, understands it and puts the verse on screen">
+</p>
+
 
 ---
 
