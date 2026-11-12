@@ -13,7 +13,7 @@
 </p>
 <p align="center">
   <a href="https://github.com/user-attachments/assets/e8b5621d-d32c-4cfb-9d8a-b0e1978452bc" title="Watch the RootsVoice intro video">
-    <img src="docs/media/intro-poster.jpg" width="720" alt="RootsVoice intro video - click to watch">
+    <img src="https://github.com/user-attachments/assets/bc8ec6de-2ea3-4a06-be24-e10b93e68bab" width="720" alt="RootsVoice intro video - click to watch">
   </a>
   <br>
   <sub><a href="https://github.com/user-attachments/assets/e8b5621d-d32c-4cfb-9d8a-b0e1978452bc">▶ Watch the 80-second intro</a> - what RootsVoice does, how it works, and why it helps.</sub>
